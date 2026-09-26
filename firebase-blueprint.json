@@ -1,0 +1,379 @@
+{
+  "entities": {
+    "Client": {
+      "title": "Client",
+      "description": "Authorized client profile and access metadata",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the client",
+          "maxLength": 128
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Client email address",
+          "maxLength": 256
+        },
+        "fullName": {
+          "type": "string",
+          "description": "Full name of the client",
+          "maxLength": 128
+        },
+        "organization": {
+          "type": "string",
+          "description": "Client organization or business",
+          "maxLength": 128
+        },
+        "role": {
+          "type": "string",
+          "enum": ["client", "admin"],
+          "description": "Role of the user in the portal"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "suspended", "revoked"],
+          "description": "Status of the client account"
+        },
+        "demoDurationMinutes": {
+          "type": "number",
+          "description": "Allocated demo session duration in minutes"
+        },
+        "timerMode": {
+          "type": "string",
+          "enum": ["continuous", "active_use", "scheduled"],
+          "description": "Timer countdown mode"
+        },
+        "allowedProductIds": {
+          "type": "array",
+          "description": "List of accessible product IDs or ['*'] for all"
+        },
+        "preferredTheme": {
+          "type": "string",
+          "description": "User preferred theme name",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp or server timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp or server timestamp"
+        }
+      },
+      "required": ["uid", "email", "fullName", "role", "status", "demoDurationMinutes", "timerMode"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "WebCraft Goods digital product specification and demo assets",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Product unique slug/identifier",
+          "maxLength": 128
+        },
+        "title": {
+          "type": "string",
+          "description": "Product display name",
+          "maxLength": 256
+        },
+        "category": {
+          "type": "string",
+          "description": "Product category",
+          "maxLength": 128
+        },
+        "shortDescription": {
+          "type": "string",
+          "description": "Short summary for catalog cards",
+          "maxLength": 512
+        },
+        "description": {
+          "type": "string",
+          "description": "Full product description and feature highlights",
+          "maxLength": 4096
+        },
+        "thumbnailUrl": {
+          "type": "string",
+          "description": "Thumbnail preview image URL",
+          "maxLength": 2048
+        },
+        "version": {
+          "type": "string",
+          "description": "Version string e.g. v2.4",
+          "maxLength": 32
+        },
+        "isPublished": {
+          "type": "boolean",
+          "description": "Whether the product is visible in catalog"
+        },
+        "features": {
+          "type": "array",
+          "description": "List of feature highlights"
+        },
+        "purchaseUrl": {
+          "type": "string",
+          "description": "Direct Etsy listing or purchase link",
+          "maxLength": 2048
+        },
+        "demoHtml": {
+          "type": "string",
+          "description": "Embedded HTML code or package bundle"
+        },
+        "viewsCount": {
+          "type": "number",
+          "description": "Total views counter"
+        },
+        "demoLaunchesCount": {
+          "type": "number",
+          "description": "Total demo launches counter"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last updated timestamp"
+        }
+      },
+      "required": ["id", "title", "category", "shortDescription", "isPublished"]
+    },
+    "DemoSession": {
+      "title": "DemoSession",
+      "description": "Authoritative demo session tracking state and timer",
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "description": "Unique session ID",
+          "maxLength": 128
+        },
+        "clientId": {
+          "type": "string",
+          "description": "Client UID",
+          "maxLength": 128
+        },
+        "clientEmail": {
+          "type": "string",
+          "description": "Client email for quick admin lookup",
+          "maxLength": 256
+        },
+        "clientName": {
+          "type": "string",
+          "description": "Client full name",
+          "maxLength": 128
+        },
+        "status": {
+          "type": "string",
+          "enum": ["idle", "active", "paused", "expired", "revoked"],
+          "description": "Current status of the demo session"
+        },
+        "currentProductId": {
+          "type": "string",
+          "description": "Currently active product ID being viewed",
+          "maxLength": 128
+        },
+        "currentProductTitle": {
+          "type": "string",
+          "description": "Currently active product title",
+          "maxLength": 256
+        },
+        "durationMinutes": {
+          "type": "number",
+          "description": "Total duration in minutes"
+        },
+        "startedAt": {
+          "type": "number",
+          "description": "Start epoch timestamp in ms"
+        },
+        "expiresAt": {
+          "type": "number",
+          "description": "Authoritative expiration epoch timestamp in ms"
+        },
+        "lastHeartbeat": {
+          "type": "number",
+          "description": "Last active heartbeat epoch timestamp in ms"
+        }
+      },
+      "required": ["sessionId", "clientId", "status", "durationMinutes"]
+    },
+    "AccessRequest": {
+      "title": "AccessRequest",
+      "description": "Client requests for extra time or new products",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Request ID",
+          "maxLength": 128
+        },
+        "clientId": {
+          "type": "string",
+          "description": "Client UID",
+          "maxLength": 128
+        },
+        "clientEmail": {
+          "type": "string",
+          "description": "Client email",
+          "maxLength": 256
+        },
+        "clientName": {
+          "type": "string",
+          "description": "Client name",
+          "maxLength": 128
+        },
+        "requestType": {
+          "type": "string",
+          "enum": ["time_extension", "product_access", "issue_report", "general_inquiry"],
+          "description": "Type of access or support request"
+        },
+        "requestedMinutes": {
+          "type": "number",
+          "description": "Requested extra minutes if time extension"
+        },
+        "productId": {
+          "type": "string",
+          "description": "Target product ID",
+          "maxLength": 128
+        },
+        "message": {
+          "type": "string",
+          "description": "Client message or reason",
+          "maxLength": 2048
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved", "rejected"],
+          "description": "Resolution status"
+        },
+        "adminNotes": {
+          "type": "string",
+          "description": "Notes from administrator",
+          "maxLength": 1024
+        },
+        "createdAt": {
+          "type": "number",
+          "description": "Created epoch timestamp"
+        }
+      },
+      "required": ["id", "clientId", "requestType", "status", "createdAt"]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "Security and usage audit logs",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Log entry unique ID",
+          "maxLength": 128
+        },
+        "actorId": {
+          "type": "string",
+          "description": "User UID who initiated event",
+          "maxLength": 128
+        },
+        "actorEmail": {
+          "type": "string",
+          "description": "User email",
+          "maxLength": 256
+        },
+        "actorRole": {
+          "type": "string",
+          "description": "admin or client",
+          "maxLength": 64
+        },
+        "action": {
+          "type": "string",
+          "description": "Action performed e.g. login, launch_demo, timer_expired, extend_time",
+          "maxLength": 128
+        },
+        "details": {
+          "type": "string",
+          "description": "Event detail or context",
+          "maxLength": 1024
+        },
+        "timestamp": {
+          "type": "number",
+          "description": "Epoch timestamp in ms"
+        }
+      },
+      "required": ["id", "action", "timestamp"]
+    },
+    "AdminSettings": {
+      "title": "AdminSettings",
+      "description": "Global application configuration and defaults",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Settings doc ID e.g. global",
+          "maxLength": 64
+        },
+        "siteName": {
+          "type": "string",
+          "description": "Site display name",
+          "maxLength": 128
+        },
+        "defaultDemoDurationMinutes": {
+          "type": "number",
+          "description": "Default demo duration for new clients"
+        },
+        "defaultTheme": {
+          "type": "string",
+          "description": "Default portal theme",
+          "maxLength": 64
+        },
+        "timerWarningThresholds": {
+          "type": "array",
+          "description": "Warning alerts in minutes [10, 5, 1]"
+        },
+        "supportEmail": {
+          "type": "string",
+          "format": "email",
+          "description": "Support contact email",
+          "maxLength": 256
+        },
+        "etsyStoreUrl": {
+          "type": "string",
+          "description": "Main Etsy shop URL",
+          "maxLength": 2048
+        },
+        "allowClientThemeChange": {
+          "type": "boolean",
+          "description": "Whether clients can pick their own theme"
+        }
+      },
+      "required": ["id", "siteName", "defaultDemoDurationMinutes", "defaultTheme"]
+    }
+  },
+  "firestore": {
+    "/clients/{clientId}": {
+      "schema": "Client",
+      "description": "Client profile, credentials metadata, and access rules"
+    },
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Catalog of digital products and secure HTML demo payload"
+    },
+    "/demoSessions/{clientId}": {
+      "schema": "DemoSession",
+      "description": "Authoritative real-time session countdown and state per client"
+    },
+    "/accessRequests/{requestId}": {
+      "schema": "AccessRequest",
+      "description": "Client requests for extra time or new products"
+    },
+    "/activityLogs/{logId}": {
+      "schema": "ActivityLog",
+      "description": "Immutable audit and telemetry events"
+    },
+    "/adminSettings/{settingsId}": {
+      "schema": "AdminSettings",
+      "description": "System-wide administrative settings"
+    }
+  }
+}

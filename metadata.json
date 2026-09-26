@@ -1,0 +1,6 @@
+{
+  "name": "WebCraft Goods — Demo Showcase Portal",
+  "description": "Centralized interactive demonstration portal for WebCraft Goods digital products, HTML planners, trackers, and business management applications with secure client credentials, server-controlled timers, and comprehensive admin controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
