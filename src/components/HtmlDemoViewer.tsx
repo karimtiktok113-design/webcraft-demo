@@ -29,11 +29,22 @@ export const HtmlDemoViewer: React.FC<HtmlDemoViewerProps> = ({
   onOpenReportIssue,
   onSessionExpired
 }) => {
-  const { currentSession, remainingSeconds, clientProfile, isClient } = useAuth();
+  const { currentSession, remainingSeconds, clientProfile, isClient, setIsDemoOpen } = useAuth();
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [iframeKey, setIframeKey] = useState(1);
   const [isCopied, setIsCopied] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Set demo open state and pause when unmounting/closing in active_use mode
+  useEffect(() => {
+    setIsDemoOpen(true);
+    return () => {
+      setIsDemoOpen(false);
+      if (isClient && clientProfile && (clientProfile.timerMode === 'active_use' || currentSession?.timerMode === 'active_use')) {
+        sessionService.pauseSession(clientProfile.uid, clientProfile);
+      }
+    };
+  }, [isClient, clientProfile, currentSession?.timerMode, setIsDemoOpen]);
 
   // Check if session has expired
   useEffect(() => {

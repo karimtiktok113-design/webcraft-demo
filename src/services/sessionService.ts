@@ -10,7 +10,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase/config';
 import { handleFirestoreError, OperationType } from '../firebase/errors';
-import { DemoSession, SessionStatus } from '../types';
+import { DemoSession, SessionStatus, TimerMode, ClientProfile } from '../types';
 
 const COLLECTION_NAME = 'demoSessions';
 
@@ -62,13 +62,34 @@ export const sessionService = {
     clientId: string, 
     clientEmail: string, 
     clientName: string, 
-    durationMinutes: number
+    durationMinutes: number,
+    timerMode: TimerMode = 'continuous',
+    scheduledExpiresAt?: number | null
   ): Promise<DemoSession> {
     const docRef = doc(db, COLLECTION_NAME, clientId);
     const existing = await getDoc(docRef);
     if (existing.exists()) {
-      return existing.data() as DemoSession;
+      const existingData = existing.data() as DemoSession;
+      // If timer mode, duration, or schedule changed, synchronize it immediately
+      const modeChanged = timerMode && existingData.timerMode !== timerMode;
+      const scheduleChanged = scheduledExpiresAt !== undefined && existingData.scheduledExpiresAt !== scheduledExpiresAt;
+      
+      if (modeChanged || scheduleChanged) {
+        const updates: Partial<DemoSession> & Record<string, any> = {
+          timerMode: timerMode || 'continuous',
+          scheduledExpiresAt: scheduledExpiresAt || null
+        };
+        if (timerMode === 'scheduled' && scheduledExpiresAt) {
+          updates.expiresAt = scheduledExpiresAt;
+        } else if (timerMode === 'active_use' && !existingData.pauseRemainingMs) {
+          updates.pauseRemainingMs = (existingData.durationMinutes || durationMinutes || 15) * 60 * 1000;
+        }
+        await updateDoc(docRef, updates);
+        return { ...existingData, ...updates } as DemoSession;
+      }
+      return existingData;
     }
+
     const newSession: DemoSession = {
       sessionId: `sess_${clientId}_${Date.now()}`,
       clientId,
@@ -76,8 +97,16 @@ export const sessionService = {
       clientName,
       status: 'idle',
       durationMinutes,
-      lastHeartbeat: Date.now()
+      timerMode: timerMode || 'continuous',
+      scheduledExpiresAt: scheduledExpiresAt || null,
+      lastHeartbeat: Date.now(),
+      lastActiveAt: Date.now(),
+      isAutoPaused: false,
+      isDemoOpen: false,
+      pauseRemainingMs: durationMinutes * 60 * 1000,
+      ...(timerMode === 'scheduled' && scheduledExpiresAt ? { expiresAt: scheduledExpiresAt } : {})
     };
+
     try {
       await setDoc(docRef, newSession);
       return newSession;
@@ -86,7 +115,13 @@ export const sessionService = {
     }
   },
 
-  async activateSession(clientId: string, currentProductId?: string, currentProductTitle?: string): Promise<void> {
+  async activateSession(
+    clientId: string, 
+    currentProductId?: string, 
+    currentProductTitle?: string,
+    timerMode?: TimerMode,
+    scheduledExpiresAt?: number | null
+  ): Promise<void> {
     const docRef = doc(db, COLLECTION_NAME, clientId);
     try {
       const snap = await getDoc(docRef);
@@ -94,13 +129,36 @@ export const sessionService = {
       const session = snap.data() as DemoSession;
       
       const now = Date.now();
-      const expiresAt = now + (session.durationMinutes * 60 * 1000);
+      const mode = timerMode || session.timerMode || 'continuous';
+      const scheduledTarget = scheduledExpiresAt !== undefined ? scheduledExpiresAt : (session.scheduledExpiresAt || null);
+
+      let expiresAt: number;
+      let pauseRemainingMs: number | null = null;
+
+      if (mode === 'scheduled') {
+        expiresAt = scheduledTarget || (now + (session.durationMinutes * 60 * 1000));
+      } else if (mode === 'active_use') {
+        // Resume from previous remaining time or start fresh baseline
+        const remainingActiveMs = (session.pauseRemainingMs !== undefined && session.pauseRemainingMs !== null && session.pauseRemainingMs > 0)
+          ? session.pauseRemainingMs
+          : (session.durationMinutes * 60 * 1000);
+        expiresAt = now + remainingActiveMs;
+        pauseRemainingMs = remainingActiveMs;
+      } else {
+        expiresAt = now + (session.durationMinutes * 60 * 1000);
+      }
       
       await updateDoc(docRef, {
         status: 'active',
-        startedAt: now,
+        startedAt: session.startedAt || now,
         expiresAt: expiresAt,
+        timerMode: mode,
+        scheduledExpiresAt: scheduledTarget,
         lastHeartbeat: now,
+        lastActiveAt: now,
+        isAutoPaused: false,
+        isDemoOpen: true,
+        pauseRemainingMs: pauseRemainingMs,
         ...(currentProductId ? { currentProductId, currentProductTitle } : {})
       });
     } catch (error) {
@@ -108,13 +166,21 @@ export const sessionService = {
     }
   },
 
-  async updateHeartbeat(clientId: string, currentProductId?: string, currentProductTitle?: string): Promise<void> {
+  async updateHeartbeat(clientId: string, currentProductId?: string, currentProductTitle?: string, isDemoOpen?: boolean): Promise<void> {
     const docRef = doc(db, COLLECTION_NAME, clientId);
     try {
-      await updateDoc(docRef, {
+      const updates: Record<string, any> = {
         lastHeartbeat: Date.now(),
-        ...(currentProductId ? { currentProductId, currentProductTitle } : {})
-      });
+        lastActiveAt: Date.now()
+      };
+      if (currentProductId) {
+        updates.currentProductId = currentProductId;
+        updates.currentProductTitle = currentProductTitle || null;
+      }
+      if (isDemoOpen !== undefined) {
+        updates.isDemoOpen = isDemoOpen;
+      }
+      await updateDoc(docRef, updates);
     } catch {
       // heartbeat best-effort
     }
@@ -122,6 +188,107 @@ export const sessionService = {
 
   async heartbeat(clientId: string): Promise<void> {
     return this.updateHeartbeat(clientId);
+  },
+
+  // Active Use Tracking: auto-pause session when user is inactive or switches tab
+  async autoPauseSession(clientId: string, clientProfile?: ClientProfile | null): Promise<void> {
+    const docRef = doc(db, COLLECTION_NAME, clientId);
+    try {
+      const snap = await getDoc(docRef);
+      if (!snap.exists()) return;
+      const session = snap.data() as DemoSession;
+      if (session.status !== 'active' || session.isAutoPaused) return;
+
+      const remainingSec = this.calculateRemainingSeconds(session, clientProfile, false);
+      const remainingMs = Math.max(0, remainingSec * 1000);
+
+      await updateDoc(docRef, {
+        isAutoPaused: true,
+        pauseRemainingMs: remainingMs,
+        lastHeartbeat: Date.now()
+      });
+    } catch {
+      // best-effort
+    }
+  },
+
+  // Active Use Tracking: auto-resume session when user resumes activity inside demo
+  async autoResumeSession(clientId: string): Promise<void> {
+    const docRef = doc(db, COLLECTION_NAME, clientId);
+    try {
+      const snap = await getDoc(docRef);
+      if (!snap.exists()) return;
+      const session = snap.data() as DemoSession;
+      if (session.status === 'expired' || session.status === 'revoked') return;
+      if (session.status !== 'active' && session.status !== 'paused' && !session.isAutoPaused) return;
+
+      const remainingMs = (session.pauseRemainingMs !== undefined && session.pauseRemainingMs !== null && session.pauseRemainingMs > 0)
+        ? session.pauseRemainingMs 
+        : (session.durationMinutes * 60 * 1000);
+      const newExpiresAt = Date.now() + Math.max(1000, remainingMs);
+
+      await updateDoc(docRef, {
+        status: 'active',
+        isAutoPaused: false,
+        isDemoOpen: true,
+        expiresAt: newExpiresAt,
+        pauseRemainingMs: remainingMs,
+        lastHeartbeat: Date.now(),
+        lastActiveAt: Date.now()
+      });
+    } catch {
+      // best-effort
+    }
+  },
+
+  // Update session policy directly from Admin
+  async updateSessionPolicy(
+    clientId: string,
+    timerMode: TimerMode,
+    durationMinutes?: number,
+    scheduledExpiresAt?: number | null
+  ): Promise<void> {
+    const docRef = doc(db, COLLECTION_NAME, clientId);
+    try {
+      const snap = await getDoc(docRef);
+      if (!snap.exists()) return;
+      const session = snap.data() as DemoSession;
+
+      const updates: Partial<DemoSession> & Record<string, any> = {
+        timerMode,
+        scheduledExpiresAt: scheduledExpiresAt || null,
+        lastHeartbeat: Date.now()
+      };
+
+      if (durationMinutes !== undefined && durationMinutes > 0) {
+        updates.durationMinutes = durationMinutes;
+      }
+
+      const effectiveDuration = durationMinutes || session.durationMinutes || 15;
+
+      if (timerMode === 'scheduled') {
+        if (scheduledExpiresAt) {
+          updates.expiresAt = scheduledExpiresAt;
+        } else if (!session.expiresAt) {
+          updates.expiresAt = Date.now() + (effectiveDuration * 60 * 1000);
+        }
+      } else if (timerMode === 'active_use') {
+        const remainingSec = this.calculateRemainingSeconds(session, null, false);
+        updates.pauseRemainingMs = remainingSec * 1000;
+        updates.expiresAt = Date.now() + (remainingSec * 1000);
+      } else if (timerMode === 'continuous') {
+        if (session.isAutoPaused || session.status === 'paused') {
+          const remainingSec = this.calculateRemainingSeconds(session, null, true);
+          updates.isAutoPaused = false;
+          updates.status = 'active';
+          updates.expiresAt = Date.now() + (remainingSec * 1000);
+        }
+      }
+
+      await updateDoc(docRef, updates);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `${COLLECTION_NAME}/${clientId}`);
+    }
   },
 
   async extendSessionTime(clientId: string, additionalMinutes: number): Promise<void> {
@@ -132,11 +299,40 @@ export const sessionService = {
       const session = snap.data() as DemoSession;
 
       const now = Date.now();
+      const additionalMs = additionalMinutes * 60 * 1000;
+
+      if (session.timerMode === 'scheduled' && session.scheduledExpiresAt) {
+        const newExpiresAt = Math.max(now, session.scheduledExpiresAt) + additionalMs;
+        await updateDoc(docRef, {
+          status: 'active',
+          scheduledExpiresAt: newExpiresAt,
+          expiresAt: newExpiresAt,
+          durationMinutes: (session.durationMinutes || 15) + additionalMinutes,
+          pauseRemainingMs: null,
+          lastHeartbeat: now
+        });
+        return;
+      }
+
+      if (session.timerMode === 'active_use') {
+        const currentRemaining = (session.pauseRemainingMs !== undefined && session.pauseRemainingMs !== null)
+          ? session.pauseRemainingMs 
+          : (this.calculateRemainingSeconds(session, null, false) * 1000);
+        const newRemainingMs = Math.max(0, currentRemaining) + additionalMs;
+        await updateDoc(docRef, {
+          expiresAt: now + newRemainingMs,
+          pauseRemainingMs: newRemainingMs,
+          durationMinutes: (session.durationMinutes || 15) + additionalMinutes,
+          lastHeartbeat: now
+        });
+        return;
+      }
+
       let newExpiresAt: number;
       if (session.status === 'expired' || !session.expiresAt || session.expiresAt < now) {
-        newExpiresAt = now + (additionalMinutes * 60 * 1000);
+        newExpiresAt = now + additionalMs;
       } else {
-        newExpiresAt = session.expiresAt + (additionalMinutes * 60 * 1000);
+        newExpiresAt = session.expiresAt + additionalMs;
       }
 
       await updateDoc(docRef, {
@@ -156,32 +352,50 @@ export const sessionService = {
     try {
       const snap = await getDoc(docRef);
       if (!snap.exists()) return;
+      const session = snap.data() as DemoSession;
       const now = Date.now();
       const expiresAt = now + (Math.max(1, minutes) * 60 * 1000);
-      await updateDoc(docRef, {
-        status: 'active',
-        startedAt: now,
+
+      const updates: Partial<DemoSession> & Record<string, any> = {
+        startedAt: session.startedAt || now,
         expiresAt,
         durationMinutes: Math.max(1, minutes),
-        pauseRemainingMs: null,
+        pauseRemainingMs: Math.max(1, minutes) * 60 * 1000,
         lastHeartbeat: now
-      });
+      };
+
+      if (session.timerMode === 'scheduled') {
+        updates.scheduledExpiresAt = expiresAt;
+      }
+
+      await updateDoc(docRef, updates);
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `${COLLECTION_NAME}/${clientId}`);
     }
   },
 
-  async pauseSession(clientId: string): Promise<void> {
+  // Authoritatively pause session when client closes the demo or clicks pause
+  async pauseSession(clientId: string, clientProfile?: ClientProfile | null): Promise<void> {
     const docRef = doc(db, COLLECTION_NAME, clientId);
     try {
       const snap = await getDoc(docRef);
       if (!snap.exists()) return;
       const session = snap.data() as DemoSession;
       if (session.status !== 'active') return;
-      const remainingSec = this.calculateRemainingSeconds(session);
+
+      let remainingMs = (session.durationMinutes || 15) * 60 * 1000;
+      if (session.expiresAt && session.expiresAt > Date.now()) {
+        remainingMs = Math.max(0, session.expiresAt - Date.now());
+      } else if (session.pauseRemainingMs !== undefined && session.pauseRemainingMs !== null) {
+        remainingMs = session.pauseRemainingMs;
+      }
+
       await updateDoc(docRef, {
         status: 'paused',
-        pauseRemainingMs: Math.max(0, remainingSec * 1000),
+        isAutoPaused: false,
+        isDemoOpen: false,
+        pauseRemainingMs: remainingMs,
+        expiresAt: Date.now() + remainingMs,
         lastHeartbeat: Date.now()
       });
     } catch (error) {
@@ -195,14 +409,17 @@ export const sessionService = {
       const snap = await getDoc(docRef);
       if (!snap.exists()) return;
       const session = snap.data() as DemoSession;
-      if (session.status !== 'paused') return;
+      if (session.status !== 'paused' && !session.isAutoPaused) return;
       const pauseRemainingMs = session.pauseRemainingMs || (session.durationMinutes * 60 * 1000);
       const newExpiresAt = Date.now() + Math.max(5000, pauseRemainingMs);
       await updateDoc(docRef, {
         status: 'active',
+        isAutoPaused: false,
+        isDemoOpen: true,
         expiresAt: newExpiresAt,
-        pauseRemainingMs: null,
-        lastHeartbeat: Date.now()
+        pauseRemainingMs: session.timerMode === 'active_use' ? pauseRemainingMs : null,
+        lastHeartbeat: Date.now(),
+        lastActiveAt: Date.now()
       });
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `${COLLECTION_NAME}/${clientId}`);
@@ -219,6 +436,7 @@ export const sessionService = {
       if (session.status === 'idle') {
         await updateDoc(docRef, {
           durationMinutes: newDurationMinutes,
+          pauseRemainingMs: newDurationMinutes * 60 * 1000,
           lastHeartbeat: Date.now()
         });
       } else if (session.status === 'active' && session.expiresAt) {
@@ -240,22 +458,38 @@ export const sessionService = {
     }
   },
 
-  async resetSession(clientId: string, newDurationMinutes?: number): Promise<void> {
+  async resetSession(clientId: string, durationMinutes: number = 15, timerMode: TimerMode = 'continuous', scheduledExpiresAt?: number | null): Promise<void> {
     const docRef = doc(db, COLLECTION_NAME, clientId);
     try {
-      const snap = await getDoc(docRef);
-      if (!snap.exists()) return;
-      const session = snap.data() as DemoSession;
-      const duration = newDurationMinutes || session.durationMinutes || 15;
-
-      await updateDoc(docRef, {
+      const now = Date.now();
+      const updates: Partial<DemoSession> & Record<string, any> = {
         status: 'idle',
-        durationMinutes: duration,
-        startedAt: null,
-        expiresAt: null,
-        pauseRemainingMs: null,
-        currentProductId: null,
-        currentProductTitle: null,
+        durationMinutes,
+        timerMode,
+        scheduledExpiresAt: scheduledExpiresAt || null,
+        startedAt: undefined,
+        expiresAt: timerMode === 'scheduled' && scheduledExpiresAt ? scheduledExpiresAt : undefined,
+        currentProductId: undefined,
+        currentProductTitle: undefined,
+        isAutoPaused: false,
+        isDemoOpen: false,
+        pauseRemainingMs: durationMinutes * 60 * 1000,
+        lastHeartbeat: now,
+        lastActiveAt: now
+      };
+      await updateDoc(docRef, updates);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `${COLLECTION_NAME}/${clientId}`);
+    }
+  },
+
+  async markExpired(clientId: string): Promise<void> {
+    const docRef = doc(db, COLLECTION_NAME, clientId);
+    try {
+      await updateDoc(docRef, {
+        status: 'expired',
+        isAutoPaused: false,
+        isDemoOpen: false,
         lastHeartbeat: Date.now()
       });
     } catch (error) {
@@ -268,18 +502,8 @@ export const sessionService = {
     try {
       await updateDoc(docRef, {
         status: 'revoked',
-        lastHeartbeat: Date.now()
-      });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `${COLLECTION_NAME}/${clientId}`);
-    }
-  },
-
-  async markExpired(clientId: string): Promise<void> {
-    const docRef = doc(db, COLLECTION_NAME, clientId);
-    try {
-      await updateDoc(docRef, {
-        status: 'expired',
+        isAutoPaused: false,
+        isDemoOpen: false,
         lastHeartbeat: Date.now()
       });
     } catch (error) {
@@ -296,17 +520,68 @@ export const sessionService = {
     }
   },
 
-  // Calculate remaining time in seconds based on authoritative server timestamp
-  calculateRemainingSeconds(session: DemoSession | null): number {
+  // Calculate remaining time in seconds based on authoritative server timestamp & policy
+  calculateRemainingSeconds(
+    session: DemoSession | null, 
+    clientProfile?: ClientProfile | null,
+    isDemoOpen?: boolean
+  ): number {
     if (!session) return 0;
+    if (session.status === 'expired' || session.status === 'revoked') {
+      return 0;
+    }
+
+    // Client profile policy takes authoritative priority if configured, otherwise session policy
+    const effectiveMode = clientProfile?.timerMode || session.timerMode || 'continuous';
+
+    // 1. SCHEDULED EXPIRY MODE
+    if (effectiveMode === 'scheduled') {
+      const targetTime = session.scheduledExpiresAt || clientProfile?.accountExpiresAt || session.expiresAt;
+      if (!targetTime) {
+        return (session.durationMinutes || 15) * 60;
+      }
+      const diffMs = targetTime - Date.now();
+      return Math.max(0, Math.floor(diffMs / 1000));
+    }
+
+    // 2. ACTIVE USE TRACKING MODE
+    if (effectiveMode === 'active_use') {
+      if (session.status === 'idle') {
+        return (session.durationMinutes || 15) * 60;
+      }
+      
+      // Determine if demo is currently open:
+      // If isDemoOpen was passed explicitly, respect it; otherwise fall back to session.isDemoOpen
+      const isActuallyOpen = isDemoOpen !== undefined ? isDemoOpen : Boolean(session.isDemoOpen);
+
+      // In active_use mode: if demo is closed, session is paused, or auto-paused:
+      // THE TIMER MUST BE 100% FROZEN!
+      if (!isActuallyOpen || session.status === 'paused' || session.isAutoPaused) {
+        let remainingMs: number;
+        if (session.pauseRemainingMs !== undefined && session.pauseRemainingMs !== null && session.pauseRemainingMs >= 0) {
+          remainingMs = session.pauseRemainingMs;
+        } else if (session.expiresAt && session.expiresAt > Date.now()) {
+          remainingMs = session.expiresAt - Date.now();
+        } else {
+          remainingMs = (session.durationMinutes || 15) * 60 * 1000;
+        }
+        return Math.max(0, Math.floor(remainingMs / 1000));
+      }
+
+      // If demo is actively running and tab is active:
+      if (session.expiresAt) {
+        const remainingMs = session.expiresAt - Date.now();
+        return Math.max(0, Math.floor(remainingMs / 1000));
+      }
+      return (session.durationMinutes || 15) * 60;
+    }
+
+    // 3. CONTINUOUS COUNTDOWN MODE (default)
     if (session.status === 'idle') {
       return (session.durationMinutes || 15) * 60;
     }
     if (session.status === 'paused') {
       return Math.max(0, Math.floor((session.pauseRemainingMs || ((session.durationMinutes || 15) * 60 * 1000)) / 1000));
-    }
-    if (session.status === 'expired' || session.status === 'revoked') {
-      return 0;
     }
     if (!session.expiresAt) {
       return (session.durationMinutes || 15) * 60;

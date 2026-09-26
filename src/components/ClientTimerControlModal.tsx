@@ -36,6 +36,10 @@ export const ClientTimerControlModal: React.FC<ClientTimerControlModalProps> = (
   const [customMinutes, setCustomMinutes] = useState<number>(15);
   const [baselineMinutes, setBaselineMinutes] = useState<number>(client?.demoDurationMinutes || 15);
   const [selectedTimerMode, setSelectedTimerMode] = useState<TimerMode>(client?.timerMode || 'continuous');
+  const [scheduledDateStr, setScheduledDateStr] = useState<string>(() => {
+    const ts = client?.accountExpiresAt || (Date.now() + 24 * 60 * 60 * 1000);
+    return new Date(ts).toISOString().slice(0, 16);
+  });
   const [isProcessing, setIsProcessing] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
 
@@ -45,9 +49,15 @@ export const ClientTimerControlModal: React.FC<ClientTimerControlModalProps> = (
 
     setBaselineMinutes(client.demoDurationMinutes || 15);
     setSelectedTimerMode(client.timerMode || 'continuous');
+    if (client.accountExpiresAt) {
+      setScheduledDateStr(new Date(client.accountExpiresAt).toISOString().slice(0, 16));
+    }
 
     const unsub = sessionService.subscribeSession(client.uid, (sess) => {
       setSession(sess);
+      if (sess?.scheduledExpiresAt) {
+        setScheduledDateStr(new Date(sess.scheduledExpiresAt).toISOString().slice(0, 16));
+      }
     });
 
     return () => unsub();
@@ -58,14 +68,14 @@ export const ClientTimerControlModal: React.FC<ClientTimerControlModalProps> = (
     if (!session || !isOpen) return;
 
     const tick = () => {
-      const sec = sessionService.calculateRemainingSeconds(session);
+      const sec = sessionService.calculateRemainingSeconds(session, client, session.isDemoOpen);
       setRemainingSeconds(sec);
     };
 
     tick();
     const interval = setInterval(tick, 1000);
     return () => clearInterval(interval);
-  }, [session, isOpen]);
+  }, [session, client, isOpen]);
 
   if (!isOpen || !client) return null;
 
@@ -133,8 +143,11 @@ export const ClientTimerControlModal: React.FC<ClientTimerControlModalProps> = (
   const handleReset = async () => {
     setIsProcessing(true);
     try {
-      await sessionService.resetSession(client.uid, baselineMinutes);
-      showFeedbackMsg(`Reset session to idle (${baselineMinutes}m baseline)`);
+      const targetExpiresAt = selectedTimerMode === 'scheduled' 
+        ? (new Date(scheduledDateStr).getTime() || (Date.now() + 24 * 3600 * 1000))
+        : null;
+      await sessionService.resetSession(client.uid, baselineMinutes, selectedTimerMode, targetExpiresAt);
+      showFeedbackMsg(`Reset session to idle (${baselineMinutes}m baseline • ${selectedTimerMode})`);
     } catch (err) {
       showFeedbackMsg('Failed to reset session');
     } finally {
@@ -157,10 +170,14 @@ export const ClientTimerControlModal: React.FC<ClientTimerControlModalProps> = (
   const handleSaveBaselineDuration = async () => {
     setIsProcessing(true);
     try {
-      await clientService.updateClientTimer(client.uid, Number(baselineMinutes), selectedTimerMode);
-      showFeedbackMsg(`Saved baseline duration: ${baselineMinutes}m (${selectedTimerMode})`);
+      let targetExpiresAt: number | null = null;
+      if (selectedTimerMode === 'scheduled') {
+        targetExpiresAt = new Date(scheduledDateStr).getTime() || (Date.now() + 24 * 3600 * 1000);
+      }
+      await clientService.updateClientTimer(client.uid, Number(baselineMinutes), selectedTimerMode, targetExpiresAt);
+      showFeedbackMsg(`Saved policy: ${baselineMinutes}m • ${selectedTimerMode}${targetExpiresAt ? ` (Expires ${new Date(targetExpiresAt).toLocaleDateString()})` : ''}`);
     } catch (err) {
-      showFeedbackMsg('Failed to save duration');
+      showFeedbackMsg('Failed to save policy');
     } finally {
       setIsProcessing(false);
     }
@@ -401,6 +418,60 @@ export const ClientTimerControlModal: React.FC<ClientTimerControlModalProps> = (
               </select>
             </div>
           </div>
+
+          {/* Mode Descriptions */}
+          <div className="p-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-[11px] text-slate-600 dark:text-slate-300">
+            {selectedTimerMode === 'continuous' && (
+              <p>⏱ <strong>Continuous Countdown:</strong> Timer runs uninterrupted in real time from launch until expiration, even if browser is closed or idle.</p>
+            )}
+            {selectedTimerMode === 'active_use' && (
+              <p>⚡ <strong>Active Use Tracking:</strong> Timer counts down only while the client is active on the site. Auto-pauses if idle for 60s or tab is hidden.</p>
+            )}
+            {selectedTimerMode === 'scheduled' && (
+              <p>📅 <strong>Scheduled Expiry:</strong> Fixed calendar window access. Client can evaluate until the scheduled target date and time arrives.</p>
+            )}
+          </div>
+
+          {/* Scheduled Date/Time Picker */}
+          {selectedTimerMode === 'scheduled' && (
+            <div className="pt-2 border-t border-slate-200 dark:border-slate-700 space-y-2">
+              <div className="flex justify-between items-center">
+                <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                  Fixed Scheduled Expiration Date & Time
+                </label>
+                <span className="text-[10px] text-purple-600 dark:text-purple-400 font-mono">
+                  {scheduledDateStr ? new Date(scheduledDateStr).toLocaleString() : ''}
+                </span>
+              </div>
+              <input
+                type="datetime-local"
+                value={scheduledDateStr}
+                onChange={(e) => setScheduledDateStr(e.target.value)}
+                className="w-full p-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-semibold text-slate-900 dark:text-white"
+              />
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[10px] text-slate-400 font-medium">Quick Presets:</span>
+                {[
+                  { label: '+24 Hours', hours: 24 },
+                  { label: '+3 Days', hours: 72 },
+                  { label: '+7 Days', hours: 168 },
+                  { label: '+30 Days', hours: 720 },
+                ].map(preset => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => {
+                      const d = new Date(Date.now() + preset.hours * 3600 * 1000);
+                      setScheduledDateStr(d.toISOString().slice(0, 16));
+                    }}
+                    className="px-2 py-1 rounded-lg text-[10px] bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 font-semibold transition cursor-pointer"
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Footer */}

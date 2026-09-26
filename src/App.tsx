@@ -15,7 +15,18 @@ import { Product } from './types';
 import { DEFAULT_PRODUCTS } from './data/defaultProducts';
 
 function MainApp() {
-  const { currentUser, clientProfile, currentSession, remainingSeconds, isAdmin, isClient, activateDemoSession } = useAuth();
+  const { 
+    currentUser, 
+    clientProfile, 
+    currentSession, 
+    remainingSeconds, 
+    isAdmin, 
+    isClient, 
+    activateDemoSession,
+    setIsDemoOpen,
+    pauseActiveSession,
+    resumeActiveUseSession
+  } = useAuth();
   const [currentView, setCurrentView] = useState<'home' | 'portal' | 'admin' | 'product_details'>('home');
   const [products, setProducts] = useState<Product[]>(DEFAULT_PRODUCTS);
   
@@ -33,6 +44,14 @@ function MainApp() {
   const [isRequestModalOpen, setIsRequestModalOpen] = useState(false);
   const [requestTargetProduct, setRequestTargetProduct] = useState<Product | null>(null);
 
+  const handleCloseDemo = async () => {
+    setActiveDemoProduct(null);
+    setIsDemoOpen(false);
+    if (isClient && clientProfile && (clientProfile.timerMode === 'active_use' || currentSession?.timerMode === 'active_use')) {
+      await pauseActiveSession();
+    }
+  };
+
   // Subscribe to real-time products & seed catalog if empty
   useEffect(() => {
     productService.seedCatalogIfEmpty(isAdmin);
@@ -48,7 +67,7 @@ function MainApp() {
   useEffect(() => {
     if (activeDemoProduct && isClient) {
       if (currentSession?.status === 'expired' || currentSession?.status === 'revoked' || (currentSession?.status === 'active' && remainingSeconds <= 0)) {
-        setActiveDemoProduct(null);
+        handleCloseDemo();
         setIsExpiredModalOpen(true);
       }
     }
@@ -81,14 +100,18 @@ function MainApp() {
         return;
       }
 
-      // Activate session if idle
+      // Activate or resume session
       if (currentSession?.status === 'idle') {
         await activateDemoSession(prod.id, prod.title);
+      } else if (clientProfile.timerMode === 'active_use' || currentSession?.timerMode === 'active_use') {
+        // In active_use mode: launching a demo actively resumes tracking
+        await resumeActiveUseSession();
       }
     }
 
     // Record metrics
     productService.incrementLaunches(prod.id);
+    setIsDemoOpen(true);
     setActiveDemoProduct(prod);
   };
 
@@ -181,10 +204,10 @@ function MainApp() {
       {activeDemoProduct && (
         <HtmlDemoViewer
           product={activeDemoProduct}
-          onClose={() => setActiveDemoProduct(null)}
+          onClose={handleCloseDemo}
           onOpenReportIssue={() => handleOpenRequestTime(activeDemoProduct)}
           onSessionExpired={() => {
-            setActiveDemoProduct(null);
+            handleCloseDemo();
             setIsExpiredModalOpen(true);
           }}
         />

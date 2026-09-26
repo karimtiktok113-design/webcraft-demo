@@ -44,11 +44,11 @@ export const DEFAULT_CLIENTS: ClientProfile[] = [
     organization: 'Studio Jenkins Creative',
     role: 'client',
     status: 'active',
-    demoDurationMinutes: 15,
-    timerMode: 'continuous',
+    demoDurationMinutes: 20,
+    timerMode: 'active_use',
     allowedProductIds: ['*'],
     preferredTheme: 'royal-purple',
-    notes: 'Prospective buyer for life & business planning system',
+    notes: 'Prospective buyer evaluating planner suite with Active Use Tracking',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     lastLoginAt: Date.now()
@@ -62,11 +62,12 @@ export const DEFAULT_CLIENTS: ClientProfile[] = [
     organization: 'Rivera Agile Consulting',
     role: 'client',
     status: 'active',
-    demoDurationMinutes: 10,
-    timerMode: 'continuous',
+    demoDurationMinutes: 60,
+    timerMode: 'scheduled',
+    accountExpiresAt: Date.now() + 3 * 24 * 3600 * 1000, // 3 days scheduled calendar window
     allowedProductIds: ['planner-pro-2026'],
     preferredTheme: 'ocean-blue',
-    notes: 'Single tool access requested for Life & Business Planner',
+    notes: 'Single tool access requested for Life & Business Planner with 3-day scheduled window',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     lastLoginAt: Date.now()
@@ -310,6 +311,14 @@ export const clientService = {
       if (idx !== -1) {
         DEFAULT_CLIENTS[idx] = { ...DEFAULT_CLIENTS[idx], ...client };
       }
+      if (client.timerMode) {
+        await sessionService.updateSessionPolicy(
+          client.uid, 
+          client.timerMode, 
+          client.demoDurationMinutes, 
+          client.accountExpiresAt
+        );
+      }
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, `${COLLECTION_NAME}/${client.uid}`);
     }
@@ -331,21 +340,30 @@ export const clientService = {
     }
   },
 
-  async updateClientTimer(uid: string, demoDurationMinutes: number, timerMode: TimerMode = 'continuous'): Promise<void> {
+  async updateClientTimer(
+    uid: string, 
+    demoDurationMinutes: number, 
+    timerMode: TimerMode = 'continuous',
+    accountExpiresAt?: number | null
+  ): Promise<void> {
     const docRef = doc(db, COLLECTION_NAME, uid);
     try {
       await updateDoc(docRef, {
         demoDurationMinutes,
         timerMode,
+        accountExpiresAt: accountExpiresAt !== undefined ? accountExpiresAt : null,
         updatedAt: new Date().toISOString()
       });
       const idx = DEFAULT_CLIENTS.findIndex(c => c.uid === uid);
       if (idx !== -1) {
         DEFAULT_CLIENTS[idx].demoDurationMinutes = demoDurationMinutes;
         DEFAULT_CLIENTS[idx].timerMode = timerMode;
+        if (accountExpiresAt !== undefined) {
+          DEFAULT_CLIENTS[idx].accountExpiresAt = accountExpiresAt;
+        }
       }
-      // Authoritatively update their live session duration in Firestore
-      await sessionService.updateSessionDuration(uid, demoDurationMinutes);
+      // Authoritatively update their live session duration & policy in Firestore
+      await sessionService.updateSessionPolicy(uid, timerMode, demoDurationMinutes, accountExpiresAt);
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `${COLLECTION_NAME}/${uid}`);
     }

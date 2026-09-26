@@ -123,6 +123,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [newClientDuration, setNewClientDuration] = useState(15);
   const [newClientTimerMode, setNewClientTimerMode] = useState<TimerMode>('continuous');
   const [newClientAllowedProds, setNewClientAllowedProds] = useState<string[]>(['*']);
+  const [newClientScheduledDate, setNewClientScheduledDate] = useState<string>(() => {
+    return new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 16);
+  });
 
   // Subscribe to real-time collections
   useEffect(() => {
@@ -183,6 +186,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
     const uid = `client_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const accessCode = newClientAccessCode.trim() || `WC-2026-${Math.floor(1000 + Math.random() * 9000)}`;
+    const targetExpiresAt = newClientTimerMode === 'scheduled'
+      ? (new Date(newClientScheduledDate).getTime() || (Date.now() + 24 * 3600 * 1000))
+      : null;
 
     const newClient: ClientProfile = {
       uid,
@@ -195,6 +201,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       status: 'active',
       demoDurationMinutes: Number(newClientDuration),
       timerMode: newClientTimerMode,
+      accountExpiresAt: targetExpiresAt,
       allowedProductIds: newClientAllowedProds,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -202,13 +209,20 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     };
 
     await clientService.saveClient(newClient);
-    await sessionService.initSessionForClient(uid, newClient.email, newClient.fullName, Number(newClientDuration));
+    await sessionService.initSessionForClient(
+      uid, 
+      newClient.email, 
+      newClient.fullName, 
+      Number(newClientDuration),
+      newClientTimerMode,
+      targetExpiresAt
+    );
     logService.recordLog(
       currentUser?.uid || 'admin',
       currentUser?.email || 'admin',
       'admin',
       'create_client',
-      `Provisioned client account: ${newClient.fullName} (${newClient.email}) with ${newClientDuration}m duration in Firestore`
+      `Provisioned client account: ${newClient.fullName} (${newClient.email}) with ${newClientDuration}m duration [Policy: ${newClientTimerMode}] in Firestore`
     );
 
     setIsAddClientOpen(false);
@@ -219,6 +233,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     setNewClientAccessCode('');
     setNewClientDuration(15);
     setNewClientTimerMode('continuous');
+    setNewClientScheduledDate(new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 16));
     setNewClientAllowedProds(['*']);
   };
 
@@ -231,17 +246,20 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       updatedAt: new Date().toISOString()
     });
 
-    // Authoritatively sync duration update to live session
-    if (editingClient.demoDurationMinutes) {
-      await sessionService.updateSessionDuration(editingClient.uid, Number(editingClient.demoDurationMinutes));
-    }
+    // Authoritatively sync timer policy, duration, and scheduled expiry to live session
+    await sessionService.updateSessionPolicy(
+      editingClient.uid,
+      editingClient.timerMode,
+      Number(editingClient.demoDurationMinutes),
+      editingClient.accountExpiresAt
+    );
 
     logService.recordLog(
       currentUser?.uid || 'admin',
       currentUser?.email || 'admin',
       'admin',
       'update_client',
-      `Updated profile, timer (${editingClient.demoDurationMinutes}m, ${editingClient.timerMode}), and digital product permissions (${editingClient.allowedProductIds.includes('*') ? 'Whole Catalog' : `${editingClient.allowedProductIds.length} tools`}) for client ${editingClient.fullName}`
+      `Updated profile, timer policy (${editingClient.demoDurationMinutes}m, ${editingClient.timerMode}${editingClient.accountExpiresAt ? `, scheduled until ${new Date(editingClient.accountExpiresAt).toLocaleDateString()}` : ''}), and digital product permissions (${editingClient.allowedProductIds.includes('*') ? 'Whole Catalog' : `${editingClient.allowedProductIds.length} tools`}) for client ${editingClient.fullName}`
     );
 
     setEditingClient(null);
@@ -325,7 +343,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   };
 
   const handleResetSession = async (clientId: string) => {
-    await sessionService.resetSession(clientId);
+    const cl = clients.find(c => c.uid === clientId);
+    await sessionService.resetSession(
+      clientId, 
+      cl?.demoDurationMinutes || 15, 
+      cl?.timerMode || 'continuous', 
+      cl?.accountExpiresAt
+    );
     logService.recordLog(
       currentUser?.uid || 'admin',
       currentUser?.email || 'admin',
@@ -676,11 +700,22 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                         <button
                           type="button"
                           onClick={() => setTimerControlClient(c)}
-                          className="font-bold font-mono text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 flex items-center gap-1.5 cursor-pointer group"
+                          className="font-bold font-mono text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 flex flex-col items-start gap-1 cursor-pointer group"
                           title="Open live timer countdown and duration controls"
                         >
-                          <Clock className="w-3.5 h-3.5 group-hover:scale-110 transition-transform" />
-                          <span className="underline decoration-dotted">{c.demoDurationMinutes} mins</span>
+                          <div className="flex items-center gap-1.5">
+                            <Clock className="w-3.5 h-3.5 group-hover:scale-110 transition-transform" />
+                            <span className="underline decoration-dotted">{c.demoDurationMinutes} mins</span>
+                          </div>
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded font-sans uppercase font-bold tracking-tight ${
+                            c.timerMode === 'active_use'
+                              ? 'bg-cyan-100 text-cyan-800 dark:bg-cyan-950 dark:text-cyan-300'
+                              : c.timerMode === 'scheduled'
+                                ? 'bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300'
+                                : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
+                          }`}>
+                            {c.timerMode === 'active_use' ? 'Active Use' : c.timerMode === 'scheduled' ? 'Scheduled' : 'Continuous'}
+                          </span>
                         </button>
                       </td>
                       <td className="p-3.5">
@@ -810,11 +845,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {sessions.map((s) => {
-                  const remainingSec = sessionService.calculateRemainingSeconds(s);
-                  const h = Math.floor(remainingSec / 3600);
+                  const targetClient = clients.find(c => c.uid === s.clientId);
+                  const effectiveMode = targetClient?.timerMode || s.timerMode || 'continuous';
+                  const isDemoClosed = effectiveMode === 'active_use' && !s.isDemoOpen && s.status !== 'idle' && s.status !== 'expired';
+                  const remainingSec = sessionService.calculateRemainingSeconds(s, targetClient, s.isDemoOpen);
+                  const days = Math.floor(remainingSec / 86400);
+                  const h = Math.floor((remainingSec % 86400) / 3600);
                   const m = Math.floor((remainingSec % 3600) / 60);
                   const sec = remainingSec % 60;
-                  const formatted = `${h > 0 ? `${h}h ` : ''}${m.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
+                  const formatted = (effectiveMode === 'scheduled' && days > 0)
+                    ? `${days}d ${h}h ${m}m`
+                    : `${h > 0 ? `${h}h ` : ''}${m.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
 
                   return (
                     <tr key={s.clientId} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition">
@@ -823,26 +864,76 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                         <div className="text-[11px] text-slate-400 font-mono">{s.clientEmail}</div>
                       </td>
                       <td className="p-3.5">
-                        <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase ${
-                          s.status === 'active'
-                            ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
-                            : s.status === 'expired'
-                            ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
-                            : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
-                        }`}>
-                          {s.status}
-                        </span>
+                        <div className="flex flex-col items-start gap-1">
+                          <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase ${
+                            s.status === 'expired'
+                              ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                              : isDemoClosed
+                              ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                              : s.isAutoPaused
+                              ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                              : s.status === 'active'
+                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                              : 'bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-300'
+                          }`}>
+                            {s.status === 'expired'
+                              ? 'Expired'
+                              : isDemoClosed
+                              ? 'Paused (Demo Closed)'
+                              : s.isAutoPaused
+                              ? 'Auto-Paused (Idle)'
+                              : s.status}
+                          </span>
+                          <span className="text-[9px] text-slate-400 uppercase font-semibold">
+                            {effectiveMode === 'active_use' ? '⚡ Active Use' : effectiveMode === 'scheduled' ? '📅 Scheduled' : '⏱ Continuous'}
+                          </span>
+                        </div>
                       </td>
                       <td className="p-3.5 text-slate-700 dark:text-slate-300 font-medium">
                         {s.currentProductTitle || <span className="text-slate-400 italic">None viewed yet</span>}
                       </td>
                       <td className="p-3.5 font-mono font-bold text-indigo-600 dark:text-indigo-400 text-sm">
-                        {s.status === 'expired' ? '00:00:00 (Expired)' : s.status === 'idle' ? `${s.durationMinutes}m (Idle)` : formatted}
+                        <div>
+                          {s.status === 'expired' 
+                            ? '00:00:00 (Expired)' 
+                            : s.status === 'idle' 
+                              ? `${s.durationMinutes}m (Idle)` 
+                              : isDemoClosed || s.isAutoPaused || s.status === 'paused'
+                                ? `PAUSED: ${formatted}` 
+                                : formatted}
+                        </div>
+                        {s.timerMode === 'scheduled' && s.scheduledExpiresAt && (
+                          <div className="text-[10px] text-purple-600 dark:text-purple-400 font-sans font-normal">
+                            Target: {new Date(s.scheduledExpiresAt).toLocaleDateString()}
+                          </div>
+                        )}
                       </td>
                       <td className="p-3.5 text-slate-400 text-[11px]">
                         {s.lastHeartbeat ? new Date(s.lastHeartbeat).toLocaleTimeString() : 'N/A'}
                       </td>
                       <td className="p-3.5 text-right space-x-1.5">
+                        <button
+                          onClick={() => {
+                            const cl = targetClient || {
+                              uid: s.clientId,
+                              email: s.clientEmail,
+                              fullName: s.clientName,
+                              role: 'client',
+                              status: 'active',
+                              demoDurationMinutes: s.durationMinutes,
+                              timerMode: s.timerMode || 'continuous',
+                              accountExpiresAt: s.scheduledExpiresAt || null,
+                              allowedProductIds: ['*'],
+                              createdAt: new Date().toISOString(),
+                              updatedAt: new Date().toISOString()
+                            } as ClientProfile;
+                            setTimerControlClient(cl);
+                          }}
+                          className="px-2.5 py-1 bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 text-[11px] font-bold rounded-lg transition cursor-pointer"
+                          title="Open timer policy and duration controls"
+                        >
+                          Timer
+                        </button>
                         <button
                           onClick={() => handleExtendTime(s.clientId, 15)}
                           className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold rounded-lg transition"
@@ -1370,11 +1461,64 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     onChange={(e) => setNewClientTimerMode(e.target.value as TimerMode)}
                     className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-900 dark:text-white font-semibold"
                   >
-                    <option value="continuous">Continuous Countdown</option>
-                    <option value="active_use">Active Use Tracking</option>
-                    <option value="scheduled">Scheduled Expiry</option>
+                    <option value="continuous">Continuous Countdown (24/7)</option>
+                    <option value="active_use">Active Use Tracking (Pauses on idle)</option>
+                    <option value="scheduled">Scheduled Expiry (Calendar deadline)</option>
                   </select>
                 </div>
+              </div>
+
+              {/* Mode Description & Scheduled Controls */}
+              <div className="p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700 text-xs">
+                {newClientTimerMode === 'continuous' && (
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    ⏱ <strong>Continuous Countdown:</strong> Real-time wall-clock countdown begins upon first tool launch and runs continuously until the allocated minutes expire.
+                  </p>
+                )}
+                {newClientTimerMode === 'active_use' && (
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    ⚡ <strong>Active Use Tracking:</strong> Time is only deducted while the client actively interacts with the evaluation tools. Auto-pauses if idle for 60s or tab is hidden.
+                  </p>
+                )}
+                {newClientTimerMode === 'scheduled' && (
+                  <div className="space-y-2">
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      📅 <strong>Fixed Expiry Schedule:</strong> Client access is active until the specific calendar date and time arrives, regardless of session restarts.
+                    </p>
+                    <div className="pt-2 border-t border-slate-200 dark:border-slate-700">
+                      <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                        Calendar Expiration Date & Time:
+                      </label>
+                      <input
+                        type="datetime-local"
+                        value={newClientScheduledDate}
+                        onChange={(e) => setNewClientScheduledDate(e.target.value)}
+                        className="w-full p-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-semibold text-slate-900 dark:text-white"
+                      />
+                      <div className="flex items-center gap-1.5 flex-wrap mt-2">
+                        <span className="text-[10px] text-slate-400 font-semibold">Presets:</span>
+                        {[
+                          { label: '+24h', hours: 24 },
+                          { label: '+3 Days', hours: 72 },
+                          { label: '+7 Days', hours: 168 },
+                          { label: '+30 Days', hours: 720 },
+                        ].map(p => (
+                          <button
+                            key={p.label}
+                            type="button"
+                            onClick={() => {
+                              const d = new Date(Date.now() + p.hours * 3600 * 1000);
+                              setNewClientScheduledDate(d.toISOString().slice(0, 16));
+                            }}
+                            className="px-2 py-0.5 rounded text-[10px] bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 font-bold transition cursor-pointer"
+                          >
+                            {p.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Digital Products Permissions Selector */}
@@ -1554,6 +1698,50 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     </button>
                   ))}
                 </div>
+
+                {/* Scheduled Date/Time Configuration for Edit Client */}
+                {editingClient.timerMode === 'scheduled' && (
+                  <div className="pt-2 border-t border-slate-200 dark:border-slate-700 space-y-2">
+                    <div className="flex justify-between items-center">
+                      <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300">
+                        Fixed Scheduled Expiration Date & Time:
+                      </label>
+                      <span className="text-[10px] text-purple-600 dark:text-purple-400 font-mono">
+                        {editingClient.accountExpiresAt ? new Date(editingClient.accountExpiresAt).toLocaleString() : 'Not configured'}
+                      </span>
+                    </div>
+                    <input
+                      type="datetime-local"
+                      value={editingClient.accountExpiresAt ? new Date(editingClient.accountExpiresAt).toISOString().slice(0, 16) : ''}
+                      onChange={(e) => {
+                        const ts = e.target.value ? new Date(e.target.value).getTime() : null;
+                        setEditingClient({ ...editingClient, accountExpiresAt: ts });
+                      }}
+                      className="w-full p-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs font-semibold text-slate-900 dark:text-white"
+                    />
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-[10px] text-slate-400 font-semibold">Presets:</span>
+                      {[
+                        { label: '+24h', hours: 24 },
+                        { label: '+3 Days', hours: 72 },
+                        { label: '+7 Days', hours: 168 },
+                        { label: '+30 Days', hours: 720 },
+                      ].map(p => (
+                        <button
+                          key={p.label}
+                          type="button"
+                          onClick={() => {
+                            const d = Date.now() + p.hours * 3600 * 1000;
+                            setEditingClient({ ...editingClient, accountExpiresAt: d });
+                          }}
+                          className="px-2 py-0.5 rounded text-[10px] bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 font-bold transition cursor-pointer"
+                        >
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Digital Products Permissions Selector */}

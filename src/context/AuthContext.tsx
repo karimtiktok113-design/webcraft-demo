@@ -39,6 +39,11 @@ interface AuthContextType {
   quickLoginAs: (role: 'admin' | 'client_active' | 'client_limited' | 'client_expired') => Promise<void>;
   logout: () => Promise<void>;
   activateDemoSession: (productId?: string, productTitle?: string) => Promise<void>;
+  resumeActiveUseSession: () => Promise<void>;
+  pauseActiveSession: () => Promise<void>;
+  isAutoPaused: boolean;
+  isDemoOpen: boolean;
+  setIsDemoOpen: (open: boolean) => void;
   remainingSeconds: number;
   refreshProfile: () => Promise<void>;
 }
@@ -51,6 +56,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [currentSession, setCurrentSession] = useState<DemoSession | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [remainingSeconds, setRemainingSeconds] = useState<number>(0);
+  const [isDemoOpen, setIsDemoOpen] = useState<boolean>(false);
+  const isAutoPaused = Boolean(currentSession?.isAutoPaused);
+
+  const isAdmin = Boolean(
+    isEmailAdmin(currentUser?.email) ||
+    clientProfile?.role === 'admin'
+  );
+
+  const isClient = Boolean(
+    clientProfile?.role === 'client'
+  );
 
   // Helper to build a pseudo User object for Firestore-authenticated clients
   const createClientUserObj = (profile: ClientProfile): User => {
@@ -112,7 +128,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                   profile.uid,
                   profile.email,
                   profile.fullName,
-                  profile.demoDurationMinutes
+                  profile.demoDurationMinutes,
+                  profile.timerMode,
+                  profile.accountExpiresAt
                 );
                 setCurrentSession(sess);
               }
@@ -172,7 +190,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               profile.uid,
               profile.email,
               profile.fullName,
-              profile.demoDurationMinutes
+              profile.demoDurationMinutes,
+              profile.timerMode,
+              profile.accountExpiresAt
             );
             setCurrentSession(sess);
           }
@@ -227,7 +247,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return;
       }
 
-      const sec = sessionService.calculateRemainingSeconds(currentSession);
+      const sec = sessionService.calculateRemainingSeconds(currentSession, clientProfile, isDemoOpen);
       setRemainingSeconds(sec);
 
       // Check if session just expired
@@ -246,18 +266,85 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     updateTimer();
     const interval = setInterval(updateTimer, 1000);
     return () => clearInterval(interval);
-  }, [currentSession]);
+  }, [currentSession, clientProfile, isDemoOpen]);
+
+  // Active usage tracking for timerMode === 'active_use'
+  useEffect(() => {
+    const effectiveMode = currentSession?.timerMode || clientProfile?.timerMode;
+    if (!isClient || !clientProfile || effectiveMode !== 'active_use') return;
+    if (!currentSession) return;
+
+    // CRITICAL: In active_use mode, timer MUST ONLY run when a demo is actively open!
+    if (!isDemoOpen) {
+      if (currentSession.status === 'active' && !currentSession.isAutoPaused) {
+        sessionService.autoPauseSession(clientProfile.uid, clientProfile);
+      }
+      return;
+    }
+
+    if (currentSession.status !== 'active') return;
+
+    let idleTimeout: NodeJS.Timeout | null = null;
+    const IDLE_LIMIT_MS = 60000; // 60 seconds without input triggers auto-pause to save evaluation time
+
+    const handleUserActive = () => {
+      // Only resume if demo is open and session was auto-paused
+      if (isDemoOpen && currentSession.isAutoPaused) {
+        sessionService.autoResumeSession(clientProfile.uid);
+      }
+      
+      // Reset idle timer
+      if (idleTimeout) clearTimeout(idleTimeout);
+      idleTimeout = setTimeout(() => {
+        // User has been idle for 60s inside demo -> auto-pause session to conserve evaluation allowance
+        sessionService.autoPauseSession(clientProfile.uid, clientProfile);
+      }, IDLE_LIMIT_MS);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        // Tab switched away or minimized -> auto-pause immediately
+        sessionService.autoPauseSession(clientProfile.uid, clientProfile);
+      } else if (isDemoOpen) {
+        // Tab restored to focus while demo is open -> resume active evaluation
+        sessionService.autoResumeSession(clientProfile.uid);
+        handleUserActive();
+      }
+    };
+
+    const handleBeforeUnload = () => {
+      // Save remaining time before closing or leaving page
+      sessionService.autoPauseSession(clientProfile.uid, clientProfile);
+    };
+
+    // Initialize idle timer
+    idleTimeout = setTimeout(() => {
+      sessionService.autoPauseSession(clientProfile.uid, clientProfile);
+    }, IDLE_LIMIT_MS);
+
+    const activityEvents = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll', 'click'];
+    activityEvents.forEach(evt => window.addEventListener(evt, handleUserActive, { passive: true }));
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      if (idleTimeout) clearTimeout(idleTimeout);
+      activityEvents.forEach(evt => window.removeEventListener(evt, handleUserActive));
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [isClient, isDemoOpen, clientProfile?.uid, clientProfile?.timerMode, currentSession?.status, currentSession?.isAutoPaused, currentSession?.timerMode]);
 
   // Periodic heartbeat sync to Firestore while demo session is active
   useEffect(() => {
     if (!currentSession || currentSession.status !== 'active') return;
 
     const heartbeatInterval = setInterval(() => {
-      sessionService.heartbeat(currentSession.clientId);
+      sessionService.updateHeartbeat(currentSession.clientId, undefined, undefined, isDemoOpen);
     }, 15000);
 
     return () => clearInterval(heartbeatInterval);
-  }, [currentSession]);
+  }, [currentSession, isDemoOpen]);
 
   const loginWithGoogle = async () => {
     setIsLoading(true);
@@ -308,7 +395,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           updatedClient.uid,
           updatedClient.email,
           updatedClient.fullName,
-          updatedClient.demoDurationMinutes
+          updatedClient.demoDurationMinutes,
+          updatedClient.timerMode,
+          updatedClient.accountExpiresAt
         );
         setCurrentSession(sess);
       } else {
@@ -360,12 +449,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     if (targetClient.role === 'client') {
       let sess = await sessionService.getSessionByClientId(targetClient.uid);
-      if (!sess) {
+      if (!sess || (targetClient.timerMode && sess.timerMode !== targetClient.timerMode) || (sess.durationMinutes !== targetClient.demoDurationMinutes)) {
         sess = await sessionService.initSessionForClient(
           targetClient.uid,
           targetClient.email,
           targetClient.fullName,
-          targetClient.demoDurationMinutes
+          targetClient.demoDurationMinutes,
+          targetClient.timerMode,
+          targetClient.accountExpiresAt
         );
       }
 
@@ -406,24 +497,47 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const activateDemoSession = async (productId?: string, productTitle?: string) => {
     if (!clientProfile) return;
-    await sessionService.activateSession(clientProfile.uid, productId, productTitle);
+    setIsDemoOpen(true);
+    await sessionService.activateSession(
+      clientProfile.uid, 
+      productId, 
+      productTitle,
+      clientProfile.timerMode,
+      clientProfile.accountExpiresAt
+    );
     logService.recordLog(
       clientProfile.uid,
       clientProfile.email,
       'client',
       'launch_demo',
-      `Launched demo for: ${productTitle || productId || 'Product'}`
+      `Launched demo for: ${productTitle || productId || 'Product'} (Policy: ${clientProfile.timerMode || 'continuous'})`
     );
   };
 
-  const isAdmin = Boolean(
-    isEmailAdmin(currentUser?.email) ||
-    clientProfile?.role === 'admin'
-  );
+  const resumeActiveUseSession = async () => {
+    if (!clientProfile) return;
+    setIsDemoOpen(true);
+    setCurrentSession(prev => prev ? { ...prev, status: 'active', isAutoPaused: false, isDemoOpen: true } : prev);
+    await sessionService.autoResumeSession(clientProfile.uid);
+  };
 
-  const isClient = Boolean(
-    clientProfile?.role === 'client'
-  );
+  const pauseActiveSession = async () => {
+    if (!clientProfile) return;
+    setIsDemoOpen(false);
+    // Immediately calculate and freeze remaining time in local state so countdown stops without delay
+    setCurrentSession(prev => {
+      if (!prev) return prev;
+      const exactRemainingSec = sessionService.calculateRemainingSeconds(prev, clientProfile, false);
+      return {
+        ...prev,
+        status: 'paused',
+        isAutoPaused: false,
+        isDemoOpen: false,
+        pauseRemainingMs: exactRemainingSec * 1000
+      };
+    });
+    await sessionService.pauseSession(clientProfile.uid, clientProfile);
+  };
 
   return (
     <AuthContext.Provider
@@ -439,6 +553,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         quickLoginAs,
         logout,
         activateDemoSession,
+        resumeActiveUseSession,
+        pauseActiveSession,
+        isAutoPaused,
+        isDemoOpen,
+        setIsDemoOpen,
         remainingSeconds,
         refreshProfile
       }}

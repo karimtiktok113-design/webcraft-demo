@@ -86,10 +86,15 @@ export interface DemoSession {
   currentProductId?: string;
   currentProductTitle?: string;
   durationMinutes: number;
+  timerMode?: TimerMode;
+  scheduledExpiresAt?: number | null;
   startedAt?: number;
   expiresAt?: number;
   lastHeartbeat?: number;
+  lastActiveAt?: number;
   pauseRemainingMs?: number;
+  isAutoPaused?: boolean;
+  isDemoOpen?: boolean;
 }
 
 export type RequestType = 'time_extension' | 'product_access' | 'issue_report' | 'general_inquiry';

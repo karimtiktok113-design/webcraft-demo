@@ -24,7 +24,10 @@ import {
   ChevronRight,
   UserCheck,
   Send,
-  Lock
+  Lock,
+  Calendar,
+  Activity,
+  Pause
 } from 'lucide-react';
 
 interface ClientPortalProps {
@@ -44,7 +47,17 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
   onRequestTime,
   onRequireLogin
 }) => {
-  const { clientProfile, currentSession, remainingSeconds, activateDemoSession, refreshProfile, logout } = useAuth();
+  const { 
+    clientProfile, 
+    currentSession, 
+    remainingSeconds, 
+    activateDemoSession, 
+    refreshProfile, 
+    logout,
+    isAutoPaused,
+    isDemoOpen,
+    resumeActiveUseSession
+  } = useAuth();
   const { theme, setTheme, availableThemes } = useTheme();
 
   const [activeTab, setActiveTab] = useState<TabType>('dashboard');
@@ -62,14 +75,24 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
     return clientProfile.allowedProductIds.includes('*') || clientProfile.allowedProductIds.includes(p.id);
   });
 
-  const hours = Math.floor(remainingSeconds / 3600);
+  const effectiveMode = clientProfile?.timerMode || currentSession?.timerMode || 'continuous';
+
+  const days = Math.floor(remainingSeconds / 86400);
+  const hours = Math.floor((remainingSeconds % 86400) / 3600);
   const minutes = Math.floor((remainingSeconds % 3600) / 60);
   const seconds = remainingSeconds % 60;
-  const timeFormatted = `${hours > 0 ? `${hours}h ` : ''}${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  
+  let timeFormatted = '';
+  if (effectiveMode === 'scheduled' && days > 0) {
+    timeFormatted = `${days}d ${hours}h ${minutes}m`;
+  } else {
+    timeFormatted = `${hours > 0 ? `${hours}h ` : ''}${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  }
 
   const isSessionActive = currentSession?.status === 'active';
   const isSessionExpired = currentSession?.status === 'expired' || (isSessionActive && remainingSeconds <= 0);
   const isSessionIdle = currentSession?.status === 'idle';
+  const isDemoClosedPaused = effectiveMode === 'active_use' && (!isDemoOpen || !currentSession?.isDemoOpen) && !isSessionIdle && !isSessionExpired;
 
   const handleStartSession = async (prod?: Product) => {
     await activateDemoSession(prod?.id, prod?.title);
@@ -196,6 +219,58 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
         {/* Main Content Area */}
         <main className="lg:col-span-3 space-y-8">
           
+          {/* Auto-Paused Banner for Active Use Policy */}
+          {isAutoPaused && isDemoOpen && (
+            <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-900 dark:text-amber-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-sm animate-in fade-in">
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-xl bg-amber-500/20 text-amber-600 dark:text-amber-400 shrink-0">
+                  <Pause className="w-5 h-5" />
+                </div>
+                <div>
+                  <p className="text-xs font-bold flex items-center gap-1.5">
+                    <span>Active Usage Evaluation Auto-Paused (Idle)</span>
+                    <span className="px-2 py-0.5 rounded-full bg-amber-200 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300 text-[10px]">
+                      Time Conserved
+                    </span>
+                  </p>
+                  <p className="text-[11px] opacity-85 mt-0.5">
+                    The timer was auto-paused because you were inactive or on another tab. Your evaluation allowance ({timeFormatted} remaining) is safely preserved.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={resumeActiveUseSession}
+                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-sm transition shrink-0 cursor-pointer"
+              >
+                <Play className="w-3.5 h-3.5 fill-current" />
+                <span>Resume Timer</span>
+              </button>
+            </div>
+          )}
+
+          {/* Reassuring Notice for Active Use Policy when Demo is Closed */}
+          {isDemoClosedPaused && (
+            <div className="p-4 rounded-2xl bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800/60 text-indigo-950 dark:text-indigo-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-sm animate-in fade-in">
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-xl bg-indigo-500/10 dark:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 shrink-0">
+                  <Clock className="w-5 h-5" />
+                </div>
+                <div>
+                  <p className="text-xs font-bold flex items-center gap-1.5">
+                    <span>Active Use Tracking: Timer Paused (Demo Inactive)</span>
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 text-[10px] font-semibold">
+                      Time Frozen
+                    </span>
+                  </p>
+                  <p className="text-[11px] opacity-85 mt-0.5">
+                    Your evaluation allowance is safely frozen at <strong>{timeFormatted}</strong>. Under Active Use policy, time is only consumed while an interactive tool is open and in use. Launch any tool below to test!
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* TAB: DASHBOARD */}
           {activeTab === 'dashboard' && (
             <div className="space-y-8">
@@ -214,13 +289,19 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                   </p>
                 </div>
 
-                <div className="bg-white/10 backdrop-blur-md p-4 rounded-2xl border border-white/20 text-center shrink-0 min-w-[160px] space-y-1">
+                <div className="bg-white/10 backdrop-blur-md p-4 rounded-2xl border border-white/20 text-center shrink-0 min-w-[170px] space-y-1">
                   <span className="text-[11px] uppercase tracking-wider text-indigo-200 font-semibold">Remaining Allowance</span>
                   <div className="font-mono text-2xl font-black text-white">
-                    {isSessionExpired ? '00:00:00' : timeFormatted}
+                    {isSessionExpired 
+                      ? '00:00:00' 
+                      : isDemoClosedPaused
+                        ? `PAUSED: ${timeFormatted}`
+                        : isAutoPaused 
+                          ? `PAUSED: ${timeFormatted}` 
+                          : timeFormatted}
                   </div>
-                  <span className="text-[10px] text-indigo-200 block">
-                    Mode: {clientProfile?.timerMode}
+                  <span className="text-[10px] text-indigo-200 block font-medium">
+                    {effectiveMode === 'active_use' ? '⚡ Active Use Tracking' : effectiveMode === 'scheduled' ? '📅 Fixed Expiry Schedule' : '⏱ Continuous Countdown'}
                   </span>
                 </div>
               </div>
@@ -231,9 +312,17 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
                   <span className="text-xs text-slate-400 font-medium">Session Status</span>
                   <p className="text-lg font-bold text-slate-900 dark:text-white mt-1 capitalize flex items-center gap-1.5">
                     <span className={`w-2 h-2 rounded-full ${
-                      isSessionActive ? 'bg-emerald-500 animate-pulse' : isSessionExpired ? 'bg-rose-500' : 'bg-amber-500'
+                      isDemoClosedPaused 
+                        ? 'bg-amber-500' 
+                        : isSessionActive 
+                          ? 'bg-emerald-500 animate-pulse' 
+                          : isSessionExpired 
+                            ? 'bg-rose-500' 
+                            : 'bg-amber-500'
                     }`} />
-                    {currentSession?.status || 'idle'}
+                    {isDemoClosedPaused 
+                      ? 'Paused (Demo Inactive)' 
+                      : (currentSession?.status || 'idle')}
                   </p>
                 </div>
 
@@ -390,10 +479,23 @@ export const ClientPortal: React.FC<ClientPortalProps> = ({
 
                 <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700">
                   <span className="text-xs text-slate-400">Timer Policy</span>
-                  <p className="text-base font-bold text-slate-800 dark:text-slate-200 mt-1 capitalize">
-                    {clientProfile?.timerMode} Countdown
+                  <p className="text-base font-bold text-slate-800 dark:text-slate-200 mt-1 capitalize flex items-center gap-1.5">
+                    {effectiveMode === 'active_use' && <Activity className="w-4 h-4 text-cyan-600" />}
+                    {effectiveMode === 'scheduled' && <Calendar className="w-4 h-4 text-purple-600" />}
+                    {effectiveMode === 'continuous' && <Clock className="w-4 h-4 text-indigo-600" />}
+                    <span>
+                      {effectiveMode === 'active_use' ? 'Active Use Tracking' : effectiveMode === 'scheduled' ? 'Scheduled Expiry' : 'Continuous Countdown'}
+                    </span>
                   </p>
-                  <p className="text-[10px] text-slate-400 mt-0.5">Continuous across tabs & reloads</p>
+                  <p className="text-[10px] text-slate-400 mt-0.5">
+                    {effectiveMode === 'active_use' 
+                      ? 'Depletes only during active interaction; auto-pauses when idle' 
+                      : effectiveMode === 'scheduled' 
+                        ? (clientProfile?.accountExpiresAt || currentSession?.scheduledExpiresAt 
+                            ? `Valid until ${new Date(clientProfile?.accountExpiresAt || currentSession?.scheduledExpiresAt || 0).toLocaleString()}` 
+                            : 'Fixed calendar evaluation window') 
+                        : 'Runs continuously once started'}
+                  </p>
                 </div>
 
                 <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700">
