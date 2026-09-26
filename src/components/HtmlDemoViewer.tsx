@@ -29,22 +29,38 @@ export const HtmlDemoViewer: React.FC<HtmlDemoViewerProps> = ({
   onOpenReportIssue,
   onSessionExpired
 }) => {
-  const { currentSession, remainingSeconds, clientProfile, isClient, setIsDemoOpen } = useAuth();
+  const { 
+    currentSession, 
+    remainingSeconds, 
+    clientProfile, 
+    isClient, 
+    setIsDemoOpen,
+    activateDemoSession,
+    resumeActiveUseSession,
+    pauseActiveSession
+  } = useAuth();
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [iframeKey, setIframeKey] = useState(1);
   const [isCopied, setIsCopied] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Set demo open state and pause when unmounting/closing in active_use mode
+  // Auto-start or resume demo session on viewer mount, and pause when closing in active_use mode
   useEffect(() => {
     setIsDemoOpen(true);
+    if (isClient && clientProfile) {
+      if (!currentSession || currentSession.status === 'idle') {
+        activateDemoSession(product.id, product.title);
+      } else if (currentSession.status === 'paused' || currentSession.isAutoPaused) {
+        resumeActiveUseSession();
+      }
+    }
     return () => {
       setIsDemoOpen(false);
       if (isClient && clientProfile && (clientProfile.timerMode === 'active_use' || currentSession?.timerMode === 'active_use')) {
-        sessionService.pauseSession(clientProfile.uid, clientProfile);
+        pauseActiveSession();
       }
     };
-  }, [isClient, clientProfile, currentSession?.timerMode, setIsDemoOpen]);
+  }, [isClient, clientProfile?.uid, currentSession?.status, currentSession?.isAutoPaused, currentSession?.timerMode, setIsDemoOpen, product.id, product.title]);
 
   // Check if session has expired
   useEffect(() => {

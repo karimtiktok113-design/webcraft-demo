@@ -10,6 +10,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase/config';
 import { handleFirestoreError, OperationType } from '../firebase/errors';
+import { sanitizeForFirestore } from '../firebase/sanitize';
 import { DemoSession, SessionStatus, TimerMode, ClientProfile } from '../types';
 
 const COLLECTION_NAME = 'demoSessions';
@@ -108,8 +109,9 @@ export const sessionService = {
     };
 
     try {
-      await setDoc(docRef, newSession);
-      return newSession;
+      const cleanSession = sanitizeForFirestore(newSession);
+      await setDoc(docRef, cleanSession);
+      return cleanSession;
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, `${COLLECTION_NAME}/${clientId}`);
     }
@@ -120,7 +122,8 @@ export const sessionService = {
     currentProductId?: string, 
     currentProductTitle?: string,
     timerMode?: TimerMode,
-    scheduledExpiresAt?: number | null
+    scheduledExpiresAt?: number | null,
+    durationMinutes?: number
   ): Promise<void> {
     const docRef = doc(db, COLLECTION_NAME, clientId);
     try {
@@ -130,26 +133,30 @@ export const sessionService = {
       
       const now = Date.now();
       const mode = timerMode || session.timerMode || 'continuous';
+      const effectiveDuration = (durationMinutes && durationMinutes > 0)
+        ? durationMinutes
+        : (session.durationMinutes || 15);
       const scheduledTarget = scheduledExpiresAt !== undefined ? scheduledExpiresAt : (session.scheduledExpiresAt || null);
 
       let expiresAt: number;
       let pauseRemainingMs: number | null = null;
 
       if (mode === 'scheduled') {
-        expiresAt = scheduledTarget || (now + (session.durationMinutes * 60 * 1000));
+        expiresAt = scheduledTarget || (now + (effectiveDuration * 60 * 1000));
       } else if (mode === 'active_use') {
         // Resume from previous remaining time or start fresh baseline
         const remainingActiveMs = (session.pauseRemainingMs !== undefined && session.pauseRemainingMs !== null && session.pauseRemainingMs > 0)
           ? session.pauseRemainingMs
-          : (session.durationMinutes * 60 * 1000);
+          : (effectiveDuration * 60 * 1000);
         expiresAt = now + remainingActiveMs;
         pauseRemainingMs = remainingActiveMs;
       } else {
-        expiresAt = now + (session.durationMinutes * 60 * 1000);
+        expiresAt = now + (effectiveDuration * 60 * 1000);
       }
       
-      await updateDoc(docRef, {
-        status: 'active',
+      const updates = {
+        status: 'active' as SessionStatus,
+        durationMinutes: effectiveDuration,
         startedAt: session.startedAt || now,
         expiresAt: expiresAt,
         timerMode: mode,
@@ -159,8 +166,11 @@ export const sessionService = {
         isAutoPaused: false,
         isDemoOpen: true,
         pauseRemainingMs: pauseRemainingMs,
-        ...(currentProductId ? { currentProductId, currentProductTitle } : {})
-      });
+        currentProductId: currentProductId || null,
+        currentProductTitle: currentProductTitle || null
+      };
+
+      await updateDoc(docRef, sanitizeForFirestore(updates));
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `${COLLECTION_NAME}/${clientId}`);
     }
@@ -462,22 +472,22 @@ export const sessionService = {
     const docRef = doc(db, COLLECTION_NAME, clientId);
     try {
       const now = Date.now();
-      const updates: Partial<DemoSession> & Record<string, any> = {
-        status: 'idle',
+      const updates: Record<string, any> = {
+        status: 'idle' as SessionStatus,
         durationMinutes,
         timerMode,
         scheduledExpiresAt: scheduledExpiresAt || null,
-        startedAt: undefined,
-        expiresAt: timerMode === 'scheduled' && scheduledExpiresAt ? scheduledExpiresAt : undefined,
-        currentProductId: undefined,
-        currentProductTitle: undefined,
+        startedAt: null,
+        expiresAt: timerMode === 'scheduled' && scheduledExpiresAt ? scheduledExpiresAt : null,
+        currentProductId: null,
+        currentProductTitle: null,
         isAutoPaused: false,
         isDemoOpen: false,
         pauseRemainingMs: durationMinutes * 60 * 1000,
         lastHeartbeat: now,
         lastActiveAt: now
       };
-      await updateDoc(docRef, updates);
+      await updateDoc(docRef, sanitizeForFirestore(updates));
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `${COLLECTION_NAME}/${clientId}`);
     }
@@ -526,7 +536,19 @@ export const sessionService = {
     clientProfile?: ClientProfile | null,
     isDemoOpen?: boolean
   ): number {
-    if (!session) return 0;
+    const baseDurationMinutes = clientProfile?.demoDurationMinutes || session?.durationMinutes || 15;
+
+    if (!session) {
+      if (clientProfile && clientProfile.role === 'client') {
+        const mode = clientProfile.timerMode || 'continuous';
+        if (mode === 'scheduled' && clientProfile.accountExpiresAt) {
+          return Math.max(0, Math.floor((clientProfile.accountExpiresAt - Date.now()) / 1000));
+        }
+        return baseDurationMinutes * 60;
+      }
+      return 0;
+    }
+
     if (session.status === 'expired' || session.status === 'revoked') {
       return 0;
     }
@@ -538,7 +560,7 @@ export const sessionService = {
     if (effectiveMode === 'scheduled') {
       const targetTime = session.scheduledExpiresAt || clientProfile?.accountExpiresAt || session.expiresAt;
       if (!targetTime) {
-        return (session.durationMinutes || 15) * 60;
+        return baseDurationMinutes * 60;
       }
       const diffMs = targetTime - Date.now();
       return Math.max(0, Math.floor(diffMs / 1000));
@@ -547,11 +569,10 @@ export const sessionService = {
     // 2. ACTIVE USE TRACKING MODE
     if (effectiveMode === 'active_use') {
       if (session.status === 'idle') {
-        return (session.durationMinutes || 15) * 60;
+        return baseDurationMinutes * 60;
       }
       
       // Determine if demo is currently open:
-      // If isDemoOpen was passed explicitly, respect it; otherwise fall back to session.isDemoOpen
       const isActuallyOpen = isDemoOpen !== undefined ? isDemoOpen : Boolean(session.isDemoOpen);
 
       // In active_use mode: if demo is closed, session is paused, or auto-paused:
@@ -563,7 +584,7 @@ export const sessionService = {
         } else if (session.expiresAt && session.expiresAt > Date.now()) {
           remainingMs = session.expiresAt - Date.now();
         } else {
-          remainingMs = (session.durationMinutes || 15) * 60 * 1000;
+          remainingMs = baseDurationMinutes * 60 * 1000;
         }
         return Math.max(0, Math.floor(remainingMs / 1000));
       }
@@ -573,18 +594,18 @@ export const sessionService = {
         const remainingMs = session.expiresAt - Date.now();
         return Math.max(0, Math.floor(remainingMs / 1000));
       }
-      return (session.durationMinutes || 15) * 60;
+      return baseDurationMinutes * 60;
     }
 
     // 3. CONTINUOUS COUNTDOWN MODE (default)
     if (session.status === 'idle') {
-      return (session.durationMinutes || 15) * 60;
+      return baseDurationMinutes * 60;
     }
     if (session.status === 'paused') {
-      return Math.max(0, Math.floor((session.pauseRemainingMs || ((session.durationMinutes || 15) * 60 * 1000)) / 1000));
+      return Math.max(0, Math.floor((session.pauseRemainingMs || (baseDurationMinutes * 60 * 1000)) / 1000));
     }
     if (!session.expiresAt) {
-      return (session.durationMinutes || 15) * 60;
+      return baseDurationMinutes * 60;
     }
     const remainingMs = session.expiresAt - Date.now();
     return Math.max(0, Math.floor(remainingMs / 1000));

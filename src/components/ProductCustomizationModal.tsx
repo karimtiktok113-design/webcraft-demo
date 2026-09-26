@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Product, ProductExternalLinks, ProductSandboxOptions } from '../types';
 import { STARTER_TEMPLATES } from '../data/productTemplates';
+import { sanitizeForFirestore } from '../firebase/sanitize';
 import { 
   X, 
   Upload, 
@@ -340,46 +341,39 @@ export const ProductCustomizationModal: React.FC<ProductCustomizationModalProps>
 
     setIsSubmitting(true);
     try {
-      const finalCategory = category === 'Custom' ? customCategory || 'Custom Tool' : category;
+      const finalCategory = category === 'Custom' ? (customCategory.trim() || 'Custom Tool') : category;
       const finalId = initialProduct?.id || title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || `tool-${Date.now()}`;
 
-      const externalLinks: ProductExternalLinks = {
-        etsyUrl: purchaseUrl,
-        ...(gumroadUrl ? { gumroadUrl } : {}),
-        ...(demoWebsiteUrl ? { demoWebsiteUrl } : {}),
-        ...(docsUrl ? { docsUrl } : {}),
-        ...(videoUrl ? { videoUrl } : {}),
-        ...(supportUrl ? { supportUrl } : {})
-      };
+      const externalLinks: ProductExternalLinks = {};
+      if (purchaseUrl.trim()) externalLinks.etsyUrl = purchaseUrl.trim();
+      if (gumroadUrl.trim()) externalLinks.gumroadUrl = gumroadUrl.trim();
+      if (demoWebsiteUrl.trim()) externalLinks.demoWebsiteUrl = demoWebsiteUrl.trim();
+      if (docsUrl.trim()) externalLinks.docsUrl = docsUrl.trim();
+      if (videoUrl.trim()) externalLinks.videoUrl = videoUrl.trim();
+      if (supportUrl.trim()) externalLinks.supportUrl = supportUrl.trim();
 
       const sandboxOptions: ProductSandboxOptions = {
-        allowStorageIsolation,
-        enableResetButton,
-        customHeaderNote,
-        suggestedDurationMinutes: Number(suggestedDuration)
+        allowStorageIsolation: Boolean(allowStorageIsolation),
+        enableResetButton: Boolean(enableResetButton),
+        customHeaderNote: customHeaderNote.trim() || 'Sandboxed Client Origin • Isolated LocalStorage',
+        suggestedDurationMinutes: Number(suggestedDuration) > 0 ? Number(suggestedDuration) : 15
       };
 
-      const productPayload: Product = {
+      const rawProductPayload: Record<string, any> = {
         id: finalId,
         title: title.trim(),
         category: finalCategory,
-        badge: badge === 'None' ? undefined : badge,
-        price,
-        originalPrice,
-        shortDescription: shortDescription || `${title} interactive tool by WebCraft Goods.`,
-        description: description || shortDescription || `${title} interactive digital tool.`,
-        targetAudience: targetAudience || undefined,
-        thumbnailUrl: thumbnailUrl || THUMBNAIL_PRESETS[0].url,
-        screenshots: screenshots.length > 0 ? screenshots : undefined,
-        version: version || 'v1.0.0',
-        isPublished,
+        price: price.trim() || '$29.00',
+        shortDescription: shortDescription.trim() || `${title} interactive tool by WebCraft Goods.`,
+        description: description.trim() || shortDescription.trim() || `${title} interactive digital tool.`,
+        thumbnailUrl: thumbnailUrl.trim() || THUMBNAIL_PRESETS[0].url,
+        version: version.trim() || 'v1.0.0',
+        isPublished: Boolean(isPublished),
         features: features.length > 0 ? features : ['Interactive tracking', 'Local persistence'],
-        supportedDevices: supportedDevices.length > 0 ? supportedDevices : ['Desktop', 'iPad'],
-        purchaseUrl: purchaseUrl || 'https://www.etsy.com',
+        supportedDevices: supportedDevices.length > 0 ? supportedDevices : ['Desktop / Mac / PC', 'iPad & Tablets'],
+        purchaseUrl: purchaseUrl.trim() || 'https://www.etsy.com',
         externalLinks,
-        demoHtml: demoHtml || '<!DOCTYPE html><html><body><h2>WebCraft Demo</h2></body></html>',
-        demoInstructions: demoInstructions || undefined,
-        tags: tags.length > 0 ? tags : undefined,
+        demoHtml: demoHtml.trim() || '<!DOCTYPE html><html><body><h2>WebCraft Demo</h2></body></html>',
         sandboxOptions,
         viewsCount: initialProduct?.viewsCount || 0,
         demoLaunchesCount: initialProduct?.demoLaunchesCount || 0,
@@ -387,9 +381,20 @@ export const ProductCustomizationModal: React.FC<ProductCustomizationModalProps>
         updatedAt: new Date().toISOString()
       };
 
-      await onSave(productPayload);
+      // Only add optional fields if non-empty
+      if (badge && badge !== 'None') rawProductPayload.badge = badge;
+      if (originalPrice.trim()) rawProductPayload.originalPrice = originalPrice.trim();
+      if (targetAudience.trim()) rawProductPayload.targetAudience = targetAudience.trim();
+      if (demoInstructions.trim()) rawProductPayload.demoInstructions = demoInstructions.trim();
+      if (screenshots.length > 0) rawProductPayload.screenshots = screenshots;
+      if (tags.length > 0) rawProductPayload.tags = tags;
+
+      const cleanPayload = sanitizeForFirestore(rawProductPayload as Product);
+
+      await onSave(cleanPayload);
       onClose();
     } catch (err: any) {
+      console.error('Error saving product:', err);
       alert(`Error saving product: ${err.message || 'Unknown error'}`);
     } finally {
       setIsSubmitting(false);

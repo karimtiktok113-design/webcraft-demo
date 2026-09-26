@@ -13,6 +13,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase/config';
 import { handleFirestoreError, OperationType } from '../firebase/errors';
+import { sanitizeForFirestore } from '../firebase/sanitize';
 import { AccessRequest, RequestStatus } from '../types';
 import { sessionService } from './sessionService';
 
@@ -28,7 +29,7 @@ export const requestService = {
       createdAt: Date.now()
     };
     try {
-      await setDoc(doc(db, COLLECTION_NAME, id), newReq);
+      await setDoc(doc(db, COLLECTION_NAME, id), sanitizeForFirestore(newReq));
       return id;
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, `${COLLECTION_NAME}/${id}`);

@@ -101,10 +101,10 @@ function MainApp() {
       }
 
       // Activate or resume session
-      if (currentSession?.status === 'idle') {
+      if (!currentSession || currentSession.status === 'idle') {
         await activateDemoSession(prod.id, prod.title);
-      } else if (clientProfile.timerMode === 'active_use' || currentSession?.timerMode === 'active_use') {
-        // In active_use mode: launching a demo actively resumes tracking
+      } else if (currentSession.status === 'paused' || clientProfile.timerMode === 'active_use' || currentSession?.timerMode === 'active_use') {
+        // In active_use mode or paused session: launching a demo actively resumes tracking
         await resumeActiveUseSession();
       }
     }

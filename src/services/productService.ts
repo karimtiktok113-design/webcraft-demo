@@ -11,6 +11,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase/config';
 import { handleFirestoreError, OperationType } from '../firebase/errors';
+import { sanitizeForFirestore } from '../firebase/sanitize';
 import { Product } from '../types';
 import { DEFAULT_PRODUCTS } from '../data/defaultProducts';
 
@@ -78,11 +79,19 @@ export const productService = {
   },
 
   async saveProduct(product: Product): Promise<void> {
-    const docRef = doc(db, COLLECTION_NAME, product.id);
+    const cleanProduct = sanitizeForFirestore(product);
+    const docRef = doc(db, COLLECTION_NAME, cleanProduct.id);
     try {
-      await setDoc(docRef, product, { merge: true });
+      await setDoc(docRef, cleanProduct, { merge: true });
+      // Keep DEFAULT_PRODUCTS updated in memory as well
+      const idx = DEFAULT_PRODUCTS.findIndex(p => p.id === cleanProduct.id);
+      if (idx !== -1) {
+        DEFAULT_PRODUCTS[idx] = cleanProduct;
+      } else {
+        DEFAULT_PRODUCTS.unshift(cleanProduct);
+      }
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `${COLLECTION_NAME}/${product.id}`);
+      handleFirestoreError(error, OperationType.WRITE, `${COLLECTION_NAME}/${cleanProduct.id}`);
     }
   },
 
@@ -90,6 +99,10 @@ export const productService = {
     const docRef = doc(db, COLLECTION_NAME, id);
     try {
       await deleteDoc(docRef);
+      const idx = DEFAULT_PRODUCTS.findIndex(p => p.id === id);
+      if (idx !== -1) {
+        DEFAULT_PRODUCTS.splice(idx, 1);
+      }
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, `${COLLECTION_NAME}/${id}`);
     }

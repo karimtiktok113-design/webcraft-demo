@@ -113,6 +113,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [deletingClient, setDeletingClient] = useState<ClientProfile | null>(null);
   const [isDeletingClient, setIsDeletingClient] = useState(false);
   const [copiedUid, setCopiedUid] = useState<string | null>(null);
+  const [settingsSaved, setSettingsSaved] = useState(false);
 
   // New Client Form state
   const [newClientName, setNewClientName] = useState('');
@@ -208,6 +209,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       lastLoginAt: Date.now()
     };
 
+    setClients(prev => [newClient, ...prev]);
     await clientService.saveClient(newClient);
     await sessionService.initSessionForClient(
       uid, 
@@ -241,6 +243,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     e.preventDefault();
     if (!editingClient) return;
 
+    setClients(prev => prev.map(c => c.uid === editingClient.uid ? { ...editingClient, updatedAt: new Date().toISOString() } : c));
     await clientService.saveClient({
       ...editingClient,
       updatedAt: new Date().toISOString()
@@ -271,6 +274,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       return;
     }
     const nextStatus = client.status === 'active' ? 'suspended' : 'active';
+    setClients(prev => prev.map(c => c.uid === client.uid ? { ...c, status: nextStatus } : c));
     await clientService.updateClientStatus(client.uid, nextStatus);
     if (nextStatus === 'suspended') {
       await sessionService.revokeSession(client.uid);
@@ -305,6 +309,12 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         deleteRequests: options.deleteRequests,
         reason: options.reason
       });
+
+      if (!options.softDelete) {
+        setClients(prev => prev.filter(c => c.uid !== deletingClient.uid));
+      } else {
+        setClients(prev => prev.map(c => c.uid === deletingClient.uid ? { ...c, status: 'suspended' } : c));
+      }
 
       if (options.recordAudit) {
         logService.recordLog(
@@ -361,6 +371,16 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
   // Product Save & Customization Handlers
   const handleSaveCustomProduct = async (prod: Product) => {
+    setProducts(prev => {
+      const idx = prev.findIndex(p => p.id === prod.id);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = prod;
+        return next;
+      }
+      return [prod, ...prev];
+    });
+
     await productService.saveProduct(prod);
     logService.recordLog(
       currentUser?.uid || 'admin',
@@ -382,6 +402,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
+    setProducts(prev => [cloned, ...prev]);
     await productService.saveProduct(cloned);
     logService.recordLog(
       currentUser?.uid || 'admin',
@@ -398,6 +419,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       isPublished: !prod.isPublished,
       updatedAt: new Date().toISOString()
     };
+    setProducts(prev => prev.map(p => p.id === updated.id ? updated : p));
     await productService.saveProduct(updated);
     logService.recordLog(
       currentUser?.uid || 'admin',
@@ -410,6 +432,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
   const handleDeleteProduct = async (prod: Product) => {
     if (confirm(`Delete product "${prod.title}" from catalog?`)) {
+      setProducts(prev => prev.filter(p => p.id !== prod.id));
       await productService.deleteProduct(prod.id);
       logService.recordLog(
         currentUser?.uid || 'admin',
@@ -1296,33 +1319,78 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             onSubmit={async (e) => {
               e.preventDefault();
               await settingsService.updateSettings(settings);
-              alert('Global settings saved to Firestore.');
+              setSettingsSaved(true);
+              setTimeout(() => setSettingsSaved(false), 3500);
             }}
             className="space-y-4"
           >
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                Portal Showcase Name
-              </label>
-              <input
-                type="text"
-                value={settings.siteName}
-                onChange={(e) => setSettings({ ...settings, siteName: e.target.value })}
-                className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-purple-500"
-              />
+            {settingsSaved && (
+              <div className="p-3 rounded-2xl bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300 text-xs font-bold flex items-center gap-2 animate-in fade-in">
+                <Check className="w-4 h-4 text-emerald-600" />
+                <span>Global configuration saved successfully to Cloud Firestore!</span>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Portal Showcase Name
+                </label>
+                <input
+                  type="text"
+                  value={settings.siteName}
+                  onChange={(e) => setSettings({ ...settings, siteName: e.target.value })}
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Portal Subtitle / Tagline
+                </label>
+                <input
+                  type="text"
+                  value={settings.tagline || ''}
+                  onChange={(e) => setSettings({ ...settings, tagline: e.target.value })}
+                  placeholder="Interactive Client Portfolio & Product Demos"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+                />
+              </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
                   Default Demo Duration (Minutes)
                 </label>
                 <input
                   type="number"
+                  min={1}
+                  max={10000}
                   value={settings.defaultDemoDurationMinutes}
                   onChange={(e) => setSettings({ ...settings, defaultDemoDurationMinutes: Number(e.target.value) })}
-                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-purple-500 font-bold"
                 />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Default Portal Theme
+                </label>
+                <select
+                  value={settings.defaultTheme || 'premium-light'}
+                  onChange={(e) => setSettings({ ...settings, defaultTheme: e.target.value as any })}
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-purple-500 font-bold"
+                >
+                  <option value="premium-light">Premium Light</option>
+                  <option value="professional-dark">Professional Dark</option>
+                  <option value="midnight-navy">Midnight Navy</option>
+                  <option value="royal-purple">Royal Purple</option>
+                  <option value="ocean-blue">Ocean Blue</option>
+                  <option value="emerald">Emerald</option>
+                  <option value="slate">Slate</option>
+                  <option value="minimal-white">Minimal White</option>
+                </select>
               </div>
 
               <div>
@@ -1340,7 +1408,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
             <div>
               <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                Etsy Store Link
+                Etsy Store / Marketplace Link
               </label>
               <input
                 type="url"
@@ -1350,12 +1418,43 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               />
             </div>
 
-            <button
-              type="submit"
-              className="px-5 py-2.5 bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold rounded-xl transition shadow-md shadow-purple-500/20 cursor-pointer"
-            >
-              Save Global Configuration
-            </button>
+            {/* Feature Toggles */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+              <label className="flex items-center gap-2.5 p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={settings.allowClientThemeChange ?? true}
+                  onChange={(e) => setSettings({ ...settings, allowClientThemeChange: e.target.checked })}
+                  className="w-4 h-4 text-purple-600 rounded focus:ring-purple-500"
+                />
+                <div>
+                  <span className="text-xs font-bold text-slate-900 dark:text-white block">Allow Client Theme Switching</span>
+                  <span className="text-[10px] text-slate-500">Clients can toggle their visual theme in the portal header</span>
+                </div>
+              </label>
+
+              <label className="flex items-center gap-2.5 p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={settings.requireActivationClick ?? true}
+                  onChange={(e) => setSettings({ ...settings, requireActivationClick: e.target.checked })}
+                  className="w-4 h-4 text-purple-600 rounded focus:ring-purple-500"
+                />
+                <div>
+                  <span className="text-xs font-bold text-slate-900 dark:text-white block">Automatic Demo Activation</span>
+                  <span className="text-[10px] text-slate-500">Starts allowed evaluation countdown immediately on demo launch</span>
+                </div>
+              </label>
+            </div>
+
+            <div className="pt-2">
+              <button
+                type="submit"
+                className="px-6 py-2.5 bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold rounded-xl transition shadow-md shadow-purple-500/20 cursor-pointer"
+              >
+                Save Global Configuration
+              </button>
+            </div>
           </form>
         </div>
       )}

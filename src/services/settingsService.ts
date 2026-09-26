@@ -8,6 +8,8 @@ import { db } from '../firebase/config';
 import { handleFirestoreError, OperationType } from '../firebase/errors';
 import { AdminSettings } from '../types';
 
+import { sanitizeForFirestore } from '../firebase/sanitize';
+
 const DOC_PATH = 'adminSettings/global';
 
 export const DEFAULT_ADMIN_SETTINGS: AdminSettings = {
@@ -57,7 +59,8 @@ export const settingsService = {
   async updateSettings(settings: Partial<AdminSettings>): Promise<void> {
     const docRef = doc(db, 'adminSettings', 'global');
     try {
-      await setDoc(docRef, settings, { merge: true });
+      const cleanSettings = sanitizeForFirestore(settings);
+      await setDoc(docRef, cleanSettings, { merge: true });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, DOC_PATH);
     }

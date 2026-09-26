@@ -10,6 +10,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase/config';
 import { handleFirestoreError, OperationType } from '../firebase/errors';
+import { sanitizeForFirestore } from '../firebase/sanitize';
 import { ClientProfile, ThemeName, TimerMode } from '../types';
 import { sessionService } from './sessionService';
 import { requestService } from './requestService';
@@ -303,34 +304,37 @@ export const clientService = {
   },
 
   async saveClient(client: ClientProfile): Promise<void> {
-    const docRef = doc(db, COLLECTION_NAME, client.uid);
+    const cleanClient = sanitizeForFirestore(client);
+    const docRef = doc(db, COLLECTION_NAME, cleanClient.uid);
     try {
-      await setDoc(docRef, client, { merge: true });
+      await setDoc(docRef, cleanClient, { merge: true });
       // Also update in-memory DEFAULT_CLIENTS if it exists there
-      const idx = DEFAULT_CLIENTS.findIndex(c => c.uid === client.uid);
+      const idx = DEFAULT_CLIENTS.findIndex(c => c.uid === cleanClient.uid);
       if (idx !== -1) {
-        DEFAULT_CLIENTS[idx] = { ...DEFAULT_CLIENTS[idx], ...client };
+        DEFAULT_CLIENTS[idx] = { ...DEFAULT_CLIENTS[idx], ...cleanClient };
+      } else {
+        DEFAULT_CLIENTS.push(cleanClient);
       }
-      if (client.timerMode) {
+      if (cleanClient.timerMode) {
         await sessionService.updateSessionPolicy(
-          client.uid, 
-          client.timerMode, 
-          client.demoDurationMinutes, 
-          client.accountExpiresAt
+          cleanClient.uid, 
+          cleanClient.timerMode, 
+          cleanClient.demoDurationMinutes, 
+          cleanClient.accountExpiresAt
         );
       }
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `${COLLECTION_NAME}/${client.uid}`);
+      handleFirestoreError(error, OperationType.WRITE, `${COLLECTION_NAME}/${cleanClient.uid}`);
     }
   },
 
   async updateClientAllowedProducts(uid: string, allowedProductIds: string[]): Promise<void> {
     const docRef = doc(db, COLLECTION_NAME, uid);
     try {
-      await updateDoc(docRef, {
+      await updateDoc(docRef, sanitizeForFirestore({
         allowedProductIds,
         updatedAt: new Date().toISOString()
-      });
+      }));
       const idx = DEFAULT_CLIENTS.findIndex(c => c.uid === uid);
       if (idx !== -1) {
         DEFAULT_CLIENTS[idx].allowedProductIds = allowedProductIds;
@@ -348,12 +352,12 @@ export const clientService = {
   ): Promise<void> {
     const docRef = doc(db, COLLECTION_NAME, uid);
     try {
-      await updateDoc(docRef, {
+      await updateDoc(docRef, sanitizeForFirestore({
         demoDurationMinutes,
         timerMode,
         accountExpiresAt: accountExpiresAt !== undefined ? accountExpiresAt : null,
         updatedAt: new Date().toISOString()
-      });
+      }));
       const idx = DEFAULT_CLIENTS.findIndex(c => c.uid === uid);
       if (idx !== -1) {
         DEFAULT_CLIENTS[idx].demoDurationMinutes = demoDurationMinutes;
@@ -377,10 +381,10 @@ export const clientService = {
     }
     const docRef = doc(db, COLLECTION_NAME, uid);
     try {
-      await updateDoc(docRef, { 
+      await updateDoc(docRef, sanitizeForFirestore({ 
         status, 
         updatedAt: new Date().toISOString() 
-      });
+      }));
       const idx = DEFAULT_CLIENTS.findIndex(c => c.uid === uid);
       if (idx !== -1) {
         DEFAULT_CLIENTS[idx].status = status;
@@ -393,10 +397,10 @@ export const clientService = {
   async updateClientTheme(uid: string, preferredTheme: ThemeName): Promise<void> {
     const docRef = doc(db, COLLECTION_NAME, uid);
     try {
-      await updateDoc(docRef, { 
+      await updateDoc(docRef, sanitizeForFirestore({ 
         preferredTheme, 
         updatedAt: new Date().toISOString() 
-      });
+      }));
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `${COLLECTION_NAME}/${uid}`);
     }

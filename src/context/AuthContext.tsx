@@ -243,7 +243,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     const updateTimer = () => {
       if (!currentSession) {
-        setRemainingSeconds(0);
+        if (clientProfile && clientProfile.role === 'client') {
+          if (clientProfile.timerMode === 'scheduled' && clientProfile.accountExpiresAt) {
+            setRemainingSeconds(Math.max(0, Math.floor((clientProfile.accountExpiresAt - Date.now()) / 1000)));
+          } else {
+            setRemainingSeconds((clientProfile.demoDurationMinutes || 15) * 60);
+          }
+        } else {
+          setRemainingSeconds(0);
+        }
         return;
       }
 
@@ -284,7 +292,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     if (currentSession.status !== 'active') return;
 
-    let idleTimeout: NodeJS.Timeout | null = null;
+    let idleTimeout: ReturnType<typeof setTimeout> | null = null;
     const IDLE_LIMIT_MS = 60000; // 60 seconds without input triggers auto-pause to save evaluation time
 
     const handleUserActive = () => {
@@ -498,12 +506,75 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const activateDemoSession = async (productId?: string, productTitle?: string) => {
     if (!clientProfile) return;
     setIsDemoOpen(true);
+
+    const now = Date.now();
+    const effectiveDuration = clientProfile.demoDurationMinutes || 15;
+    const mode = clientProfile.timerMode || 'continuous';
+    const scheduledExpiresAt = clientProfile.accountExpiresAt || null;
+
+    let expiresAt: number;
+    let pauseRemainingMs: number | null = null;
+    if (mode === 'scheduled') {
+      expiresAt = scheduledExpiresAt || (now + effectiveDuration * 60 * 1000);
+    } else if (mode === 'active_use') {
+      const remainingActiveMs = (currentSession?.pauseRemainingMs && currentSession.pauseRemainingMs > 0)
+        ? currentSession.pauseRemainingMs
+        : (effectiveDuration * 60 * 1000);
+      expiresAt = now + remainingActiveMs;
+      pauseRemainingMs = remainingActiveMs;
+    } else {
+      expiresAt = now + effectiveDuration * 60 * 1000;
+    }
+
+    // Immediately update local session state so header timer starts live right away
+    setCurrentSession(prev => {
+      const base = prev || {
+        clientId: clientProfile.uid,
+        clientEmail: clientProfile.email,
+        durationMinutes: effectiveDuration,
+        startedAt: now,
+        expiresAt: expiresAt,
+        timerMode: mode,
+        scheduledExpiresAt: scheduledExpiresAt,
+        lastHeartbeat: now,
+        lastActiveAt: now,
+        isAutoPaused: false,
+        isDemoOpen: true,
+        pauseRemainingMs: pauseRemainingMs,
+        currentProductId: productId || null,
+        currentProductTitle: productTitle || null,
+        status: 'active' as const
+      };
+      return {
+        ...base,
+        status: 'active' as const,
+        isAutoPaused: false,
+        isDemoOpen: true,
+        expiresAt: expiresAt,
+        durationMinutes: effectiveDuration,
+        timerMode: mode,
+        currentProductId: productId || base.currentProductId || null,
+        currentProductTitle: productTitle || base.currentProductTitle || null,
+        pauseRemainingMs: pauseRemainingMs
+      };
+    });
+
+    // Immediately calculate and set remaining seconds for header timer
+    if (mode === 'scheduled') {
+      setRemainingSeconds(Math.max(0, Math.floor((expiresAt - now) / 1000)));
+    } else if (mode === 'active_use') {
+      setRemainingSeconds(Math.floor((pauseRemainingMs || (effectiveDuration * 60 * 1000)) / 1000));
+    } else {
+      setRemainingSeconds(effectiveDuration * 60);
+    }
+
     await sessionService.activateSession(
       clientProfile.uid, 
       productId, 
       productTitle,
       clientProfile.timerMode,
-      clientProfile.accountExpiresAt
+      clientProfile.accountExpiresAt,
+      clientProfile.demoDurationMinutes
     );
     logService.recordLog(
       clientProfile.uid,
@@ -517,7 +588,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const resumeActiveUseSession = async () => {
     if (!clientProfile) return;
     setIsDemoOpen(true);
-    setCurrentSession(prev => prev ? { ...prev, status: 'active', isAutoPaused: false, isDemoOpen: true } : prev);
+    const now = Date.now();
+    setCurrentSession(prev => {
+      if (!prev) return prev;
+      const remainingMs = (prev.pauseRemainingMs !== null && prev.pauseRemainingMs !== undefined && prev.pauseRemainingMs > 0)
+        ? prev.pauseRemainingMs
+        : (prev.durationMinutes || clientProfile.demoDurationMinutes || 15) * 60 * 1000;
+      return {
+        ...prev,
+        status: 'active',
+        isAutoPaused: false,
+        isDemoOpen: true,
+        expiresAt: now + remainingMs,
+        lastActiveAt: now
+      };
+    });
     await sessionService.autoResumeSession(clientProfile.uid);
   };
 
